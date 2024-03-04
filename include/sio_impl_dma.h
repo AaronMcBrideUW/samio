@@ -221,10 +221,10 @@ namespace sio::impl::dma {
       template<Task&... _tasks_>
       bool set_tasks(Task&...) { 
 
-        if (sizeof...(_tasks_) > 0) {
+        if constexpr (sizeof...(_tasks_) > 0) {
 
-          static constepxr Task *taskArr[]{std::addressof(_tasks_)...};
-          static constexpr auto numt = sizeof...(_tasks_);
+          static constexpr int numt = sizeof...(_tasks_);
+          static constexpr Task *taskArr[]{std::addressof(_tasks_)...};
 
           memcpy(&baseDescArray[_index_], taskArr[0], 
             sizeof(DmacDescriptor));
@@ -233,10 +233,10 @@ namespace sio::impl::dma {
           taskArr[0]->_assigCH_ = _index_;
 
           Task *prev = taskArr[0];
-          for (int i = 1; i < sizeof...(_tasks_); i++) {
-            if (taskArr[i] == taskArr[0]) {
+          for (int i = 1; i < numt; i++) {
+            if (&taskArr[i] == &taskArr[0]) {
               break;
-            } else if (taskArr[i] && taskArr[i]->_assigCH_ == -1) {
+            } else if (taskArr[i]->_assigCH_ == -1) {
               prev->_descPtr_->DESCADDR.bit.DESCADDR 
                 = mem_addr(taskArr[i]);
               prev->_linked_ = taskArr[i];
