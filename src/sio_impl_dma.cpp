@@ -10,11 +10,11 @@ namespace sio::impl::dma {
   static __attribute__ ((section(".hsram"))) __aligned(16) DmacDescriptor 
     baseDescArray[DMAC_CH_NUM] = {};
   static Task *baseTaskArray[DMAC_CH_NUM] = { nullptr };
+  static DmacDescriptor *baseDescBuffer[DMAC_CH_NUM] = { nullptr }; 
+  uint32_t _challoc_mask_ = 0;
 
   /// SECTION: INTERNAL
   /// #############################################################################################
-
-
 
     static struct TaskImpl_ {
 
