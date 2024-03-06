@@ -5,13 +5,17 @@ namespace sio::impl::dma {
 
   using namespace sio::impl::util;
 
-  static __attribute__ ((section(".hsram"))) __aligned(16) DmacDescriptor 
+  static constinit __attribute__ ((section(".hsram"))) __aligned(16) DmacDescriptor 
     wbDescArray[DMAC_CH_NUM] = {};
-  static __attribute__ ((section(".hsram"))) __aligned(16) DmacDescriptor 
+  static constinit __attribute__ ((section(".hsram"))) __aligned(16) DmacDescriptor 
     baseDescArray[DMAC_CH_NUM] = {};
-  static Task *baseTaskArray[DMAC_CH_NUM] = { nullptr };
+
+  static constinit Task *_btask_[DMAC_CH_NUM] = { nullptr }; 
+  uint32_t constinit _challoc_mask_ = 0;
+  
+  /// \b GET_RID_OF:
+  static constinit Task *baseTaskArray[DMAC_CH_NUM] = { nullptr }; 
   static DmacDescriptor *baseDescBuffer[DMAC_CH_NUM] = { nullptr }; 
-  uint32_t _challoc_mask_ = 0;
 
   /// SECTION: INTERNAL
   /// #############################################################################################

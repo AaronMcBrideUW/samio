@@ -10,15 +10,16 @@
 
 namespace sio::impl::dma {
   
+
   /// @internal Hardware constants
-  #define DMA_DEF_UPDATE_ACTIVE true
+  #define update_wb true
   #define DMA_DEF_CH_PRILVL 2
   #define DMA_DEF_CH_RUN_STBY false
-  static constexpr uint8_t bsRef[] = {1, 2, 4};  
-  static constexpr uint8_t ssRef[] = {1, 2, 4, 8, 16, 32, 62, 128};
+  static constexpr uint8_t bs_ref[] = {1, 2, 4};  
+  static constexpr uint8_t ss_ref[] = {1, 2, 4, 8, 16, 32, 62, 128};
 
-  typedef void (*error_cb_t)(const int&, const channel_error&);
-  typedef void (*transfer_cb_t)(const int&);
+  typedef void (*error_int_t)(const int&, const channel_error&);
+  typedef void (*transfer_int_t)(const int&);
 
   enum class channel_state {
     unknown,
@@ -38,10 +39,10 @@ namespace sio::impl::dma {
 
   /// @defgroup DMA misc config
   struct __attribute__((packed, aligned(1))) {
-    static inline uint8_t min_obj_increment_size = 8;
-    static inline uint8_t prilvl_irq_priority[DMAC_LVL_NUM] = { 1 }; 
-    static inline bool prilvl_rr_arb[DMAC_LVL_NUM] = { false };
-    static inline uint8_t prilvl_service_quality[DMAC_LVL_NUM] = { 2 };
+    static constexpr uint8_t min_obj_increment_size = 8;
+    static constexpr uint8_t  prilvl_irq_priority[DMAC_LVL_NUM] = { 1 }; 
+    static constexpr bool prilvl_rr_arb[DMAC_LVL_NUM] = { false };
+    static constexpr uint8_t prilvl_service_quality[DMAC_LVL_NUM] = { 2 };
   }sys_config{};
 
 
@@ -221,40 +222,6 @@ namespace sio::impl::dma {
       template<Task&... _tasks_>
       bool set_tasks(Task&...) { 
 
-        if constexpr (sizeof...(_tasks_) > 0) {
-
-          static constexpr int numt = sizeof...(_tasks_);
-          static constexpr Task *taskArr[]{std::addressof(_tasks_)...};
-
-          memcpy(&baseDescArray[_index_], taskArr[0], 
-            sizeof(DmacDescriptor));
-          baseDescBuffer[_index_] = std::exchange(taskArr[0]->_descPtr_, 
-            &baseDescArray[_index_]);
-          taskArr[0]->_assigCH_ = _index_;
-
-          Task *prev = taskArr[0];
-          for (int i = 1; i < numt; i++) {
-            if (&taskArr[i] == &taskArr[0]) {
-              break;
-            } else if (taskArr[i]->_assigCH_ == -1) {
-              prev->_descPtr_->DESCADDR.bit.DESCADDR 
-                = mem_addr(taskArr[i]);
-              prev->_linked_ = taskArr[i];
-              taskArr[i]->_assigCH_ = _index_;
-              prev = taskArr[i];
-            }
-          }
-          if (_looped_) {
-            prev->_descPtr_->DESCADDR.bit.DESCADDR 
-              = mem_addr(taskArr[0]); 
-            prev->_linked_ = taskArr[0];
-          } else {
-            prev->_descPtr_->DESCADDR.bit.DESCADDR
-              = DMAC_SRCADDR_RESETVALUE;
-            prev->_linked_ = nullptr;
-          }
-        }
-        return true;   
       }
 
       bool clear_tasks(void); ////// TO DO 
@@ -297,9 +264,9 @@ namespace sio::impl::dma {
 
         bool linked_peripheral(const channel_peripheral&);
 
-        bool error_callback(error_cb_t);
+        // bool error_callback(error_cb_t);
 
-        bool transfer_callback(transfer_cb_t);
+        // bool transfer_callback(transfer_cb_t);
 
         bool transfer_mode(const transfer_mode&);
 
@@ -319,352 +286,567 @@ namespace sio::impl::dma {
 
   /////////////////////////////////////// TO DO -> ADD CHECKS FOR NULL TASK IN EVERY METHOD
   //                                      AND ENSURE THAT THERE IS ALWAYS A NEW TASK IN THE BUFFER ARRAY
+    
+  #define CFGMSK_SRC_POS 0
+  #define CFGMSK_DST_POS 1
+
+
   class Task { 
     friend Channel;
 
     public:
 
-      /// @brief Default allocating constructor   
-      explicit Task(void) {
-        _descPtr_ = new DmacDescriptor;
-      }
 
-      /// @brief Copy constructor .
-      Task (const Task &other) : Task() {
-        if (this != &other) {
-          this->operator = (other);
-        }
+      /// \b DONE-DONE-DONE
+      /// /@brief Default constructor
+      constexpr Task(void) = default;
+
+
+      /// \b DONE-DONE-DONE
+
+      /// @brief Copy constructor 
+      constexpr Task (const Task &other) noexcept { 
+        this->operator=(other);
       } 
 
-      /// @brief Move constructor.
-      /// NOTE: This constructor leaves moved task in 
-      ///   undefined state.
-      Task(Task &&other) noexcept {
-        if (this != &other) {
-          this->operator = (std::move(other)); 
-        }
+      constexpr Task (Task &&other) noexcept {
+        this->operator=(std::move_if_noexcept(other));
       }
+
+
+      /// \b DONE
 
       /// @brief Copy assignment operator.
-      Task &operator = (const Task &other) {
+      constexpr Task &operator = (const Task &other) noexcept {
         if (this != &other) {
           auto crit = _CritTaskSection_(_assigCH_);
-          auto link = _descPtr_->DESCADDR.bit.DESCADDR;
-          memcpy(_descPtr_, other._descPtr_, sizeof(DmacDescriptor));
-          _descPtr_->DESCADDR.bit.DESCADDR = link;
+          _cfgmsk_ = other._cfgmsk_;
+
+          auto p_link = _descPtr_->DESCADDR.bit.DESCADDR;
+          _cpydesc(_descPtr_, other._descPtr_, cpyact::copy);
+          _descPtr_->DESCADDR.reg = p_link;
+
+          if (update_wb && _is_writeback_()) {
+            auto pcount = wbDescArray[_assigCH_].BTCNT.reg;
+            _cpydesc(&wbDescArray[_assigCH_], _descPtr_, cpyact::copy);
+            wbDescArray[_assigCH_].BTCNT.reg = pcount;
+          }
         }
         return *this;
       }
 
-      /// @brief Move assignment operator.
-      Task &operator = (Task &&other) noexcept {
+
+      /// \b DONE
+
+      constexpr Task &operator = (Task &&other) noexcept {
         if (this != &other) {
+          // Avoid copy by re-assigning pointer (if base task)
+          auto asgn_base = [](Task &base, Task &other) {
+            _cpydesc(&base._desc_, other._descPtr_, cpyact::move);
+            other._descPtr_ = _assign(base._descPtr_, &base._desc_);
+            baseTaskArray[base._assigCH_] = &other;
+          };
           auto crit = _CritTaskSection_(_assigCH_);
           auto crit = _CritTaskSection_(other._assigCH_);
-          std::swap(_descPtr_, other._descPtr_);
-          std::swap(_assigCH_, other._assigCH_);
-          std::swap(_linked_, other._linked_);
+          _swap(_cfgmsk_, other._cfgmsk_);
+          _swap(_linked_, other._linked_);
+
+          // Handle cases -> both = base task, or other = base task
+          if (other._validCH_() && &other == _btask_[other._assigCH_]) {
+            if (_validCH_() && this == _btask_[_assigCH_]) {
+              _swap(_descPtr_, other._descPtr_);
+              _swap(_btask_[_assigCH_], _btask_[other._assigCH_]);            
+            } else {
+              asgn_base(other, *this);
+            }
+          } else {// Handle cases -> This = base task, or neither
+            if (_validCH_() && this == _btask_[_assigCH_]) {
+              asgn_base(*this, other);
+            } else {
+              _cpydesc(_descPtr_, other._descPtr_, cpyact::swap);
+            }
+          }
+          _swap(_assigCH_, other._assigCH_);
         }
-        return *this;
       }
+
+
+
+      /// \b DONE-DONE
+
+      constexpr void unlink(void) noexcept {
+        if (_validCH_()) {
+          auto crit = _CritTaskSection_(_assigCH_);
+        
+          // Handle case -> this = base descriptor
+          if (this == _btask_[_assigCH_]) {
+            memmove(&_desc_, &baseDescArray[_assigCH_], sizeof(_desc_));
+            _descPtr_ = &_desc_;
+            
+            if (_linked_ && _linked_ != this) {
+              memmove(&baseDescArray[_assigCH_], _linked_->_descPtr_,
+                sizeof(_desc_));
+              _linked_->_descPtr_ = &baseDescArray[_assigCH_];
+              _btask_[_assigCH_] = _linked_;
+            } else {
+              _btask_[_assigCH_] = nullptr;
+            }
+          // Handle case -> this = descriptor in linked list
+          } else {
+            Task *prev = nullptr;
+            Task *curr = _btask_[_assigCH_];
+
+            while(curr != this) {  
+              assert(curr->_linked_ != _btask_[_assigCH_]
+                && curr->_linked_);
+              prev = curr;
+              curr = curr->_linked_;
+            }
+            assert(prev);
+            prev->_linked_ = _linked_;
+            prev->_descPtr_->DESCADDR.reg = _descPtr_->DESCADDR.reg;
+          }
+          // Must update writeback
+          if (_is_writeback_()) {
+            wbDescArray[_assigCH_].DESCADDR.bit.DESCADDR
+              = DMAC_SRCADDR_RESETVALUE;
+            if (update_wb) {
+              memset(&wbDescArray[_assigCH_], 0, sizeof(_desc_));
+            }
+          }
+          _linked_ = nullptr;
+          _descPtr_->DESCADDR.reg = DMAC_SRCADDR_RESETVALUE;
+          _assigCH_ = -1; 
+        }
+      }
+
+
+      /// \b DONE-DONE
+
+      template<task_loc_t src_t, task_loc_t dst_t, int src_incr_v = -1, 
+        int dst_incr_v = -1>
+      constexpr void set_location(const src_t __restrict &src, const dst_t 
+        __restrict &dst, const int& src_incr = -1, const int& dst_incr = -1) 
+        noexcept requires task_incr_valid<src_incr_v, dst_incr_v> {
+          
+        using src_rt = std::remove_all_extents_t<src_t>;
+        using dst_rt = std::remove_all_extents_t<dst_t>;
+        auto crit = _CritTaskSection_(_assigCH_);
+
+        // Find & set alignment 
+        auto align_r = []() consteval -> unsigned int {
+          for (int i = std::size(bs_ref) - 1; i >= 0; i--) {
+            if (sizeof(src_rt) % bs_ref[i] == 0 
+            && sizeof(dst_rt) % bs_ref[i] == 0
+            && (src_incr_v == -1 ? 0 : src_incr_v) % bs_ref[i] == 0
+            && (dst_incr_v == -1 ? 0 : dst_incr_v) % bs_ref[i] == 0) {
+              return i;
+            }
+          }
+          static_assert("Internal error");
+        };
+        _descPtr_->BTCTRL.bit.BEATSIZE = align_r();
+
+        // Enable/disable incrementing
+        constexpr bool sinc = src_incr_v >= 0 || std::is_array_v<src_rt>
+          || sizeof(src_rt) > sys_config.min_obj_increment_size;
+        constexpr bool dinc = dst_incr_v >= 0 || std::is_array_v<dst_rt>
+          || sizeof(dst_rt) > sys_config.min_obj_increment_size;
+        _descPtr_->BTCTRL.bit.SRCINC = sinc;
+        _descPtr_->BTCTRL.bit.DSTINC = dinc;
+
+        // Find & set custom increment config 
+          constexpr auto mod_r = [&align_r]() consteval
+            -> std::pair<unsigned int, unsigned int> {
+            int stepsel_r = 0;
+            int stepsize_r = 0;
+
+            if (src_incr_v < 0 || dst_incr_v < 0) {
+              unsigned int stepsize_r = 1;
+              bool diff = sizeof(src_rt) > sizeof(dst_rt);
+
+              if (align_r() <= std::size(bs_ref)
+                && (std::is_array_v<src_t> || std::is_array_v<dst_t>)) {
+                // Get ratio of larger / smaller size
+                int ratio = (diff 
+                  ? sizeof(src_rt) / sizeof(dst_rt)
+                  : sizeof(dst_rt) / sizeof(src_rt)) 
+                  / bs_ref[align_r()];
+                // Ensure ratio = valid step size
+                for (int i = 0; i < std::size(ss_ref); i++) {
+                  if (ratio == ss_ref[i]) {
+                    stepsize_r = i;
+                    break;
+                  }
+                }
+              } 
+              // True = Use found config, false = use given config
+              if (diff ? src_incr_v < 0 : dst_incr_v < 0 
+                && stepsize_r > 1) {
+                stepsel_r = sizeof(src_rt) > sizeof(dst_rt) 
+                  ? DMAC_BTCTRL_STEPSEL_SRC_Val 
+                  : DMAC_BTCTRL_STEPSEL_DST_Val;
+              } else {
+                stepsel_r = src_incr_v >= 0 
+                  ? DMAC_BTCTRL_STEPSEL_SRC_Val 
+                  : DMAC_BTCTRL_STEPSEL_DST_Val;
+                stepsize_r = ((src_incr_v >= 0  
+                  ? src_incr_v : dst_incr_v) / bs_ref[align_r()]);
+              }
+            // Increment config fully specified
+            } else {
+              stepsel_r = src_incr_v > dst_incr_v 
+                ? DMAC_BTCTRL_STEPSEL_SRC_Val 
+                : DMAC_BTCTRL_STEPSEL_DST_Val;
+              stepsize_r = src_incr_v > dst_incr_v 
+                ? src_incr_v : dst_incr_v;
+            }
+            return std::make_pair(stepsel_r, stepsize_r);
+          }();
+          _descPtr_->BTCTRL.bit.STEPSEL = mod_r.first;
+          _descPtr_->BTCTRL.bit.STEPSIZE = mod_r.second;
+
+        // Find & set src/dst address     
+        _descPtr_->SRCADDR.reg = (uintptr_t)std::addressof(src);
+        _descPtr_->DSTADDR.reg = (uintptr_t)std::addressof(dst);
+        _cfgmsk_ |= ((1 << CFGMSK_SRC_POS) | (1 << CFGMSK_DST_POS));
+
+        if constexpr (!std::is_volatile_v<src_rt>) {
+          _cfgmsk_ &= ~(1 << CFGMSK_SRC_POS);
+          _descPtr_->SRCADDR.reg += addr_mod(mod_r.first
+            == DMAC_BTCTRL_STEPSEL_SRC_Val);
+        }
+        if constexpr (!std::is_volatile_v<dst_rt>) {
+          _cfgmsk_ &= ~(1 << CFGMSK_DST_POS);
+          _descPtr_->DSTADDR.reg += addr_mod(mod_r.first
+            == DMAC_BTCTRL_STEPSEL_DST_Val);
+        }
+        // Update the writeback descriptor if applicable
+        if (update_wb && _is_writeback_()) {
+          auto pcount = wbDescArray[_assigCH_].BTCNT.reg;
+          memcpy(&wbDescArray[_assigCH_], _descPtr_, 
+            sizeof(_base_));
+          wbDescArray[_assigCH_].BTCNT.reg = pcount;
+        }
+      }
+
+
+      /// \b DONE-DONE
+
+      void *get_source(void) const {
+        auto addr = _descPtr_->SRCADDR.reg; 
+        if (_cfgmsk_ & (1 << CFGMSK_SRC_POS)) {
+          addr -= addr_mod(true);
+        }
+        return addr <= 0 ? nullptr : reinterpret_cast<void*>(addr);
+      }
+
+
+      /// \b DONE-DONE
+
+      void *get_destination(void) const {
+        auto addr = _descPtr_->DSTADDR.reg;
+        if (_cfgmsk_ & (1 << CFGMSK_DST_POS)) {
+          addr -= addr_mod(false);
+        }
+        return addr <= 0 ? nullptr : reinterpret_cast<void*>(addr);
+      }
+
+
+      /// \b DONE-DONE
 
       /// NOTE: Bytes must be a multiple of the size of
       /// both location types.
-      bool set_transfer_size(const unsigned int &bytes, 
-        const bool &udpateActive = DMA_DEF_UPDATE_ACTIVE) {
-        auto beatsize = _descPtr_->BTCTRL.bit.BEATSIZE;
-        if (!is_multiple(bytes, beatsize)) {
-          return false;
-        }
-        auto crit = _CritTaskSection_(_assigCH_);
-        decltype(beatsize) value_r = safe_div(bytes, beatsize);
-        int diff_r = _descPtr_->BTCNT.bit.BTCNT - value_r;
-        
-        _descPtr_->BTCNT.bit.BTCNT = value_r;
-        if (udpateActive && _is_writeback_()) {
-          wbDescArray[_assigCH_].BTCNT.bit.BTCNT = bound_min(diff_r, 0);
-        }
-        return true;
-      }
+      constexpr void set_transfer_size(const size_t &bytes) noexcept {
+        if (bytes && bytes % _descPtr_->BTCTRL.bit.BEATSIZE == 0) {
+          if (_cfgmsk_ & (1 << CFGMSK_SRC_POS)) {
+            _descPtr_->SRCADDR.reg -= addr_mod(true);
+          }
+          if (_cfgmsk_ & (1 << CFGMSK_DST_POS)) {
+            _descPtr_->DSTADDR.reg -= addr_mod(false);
+          }
+          unsigned int cbytes = bytes / _descPtr_
+            ->BTCTRL.bit.BEATSIZE;
+          auto prev = std::exchange(_descPtr_->BTCNT.reg, cbytes);
+          auto crit = _CritTaskSection_(_assigCH_);
 
-      int get_transfer_size(void) {
-        return _descPtr_->BTCNT.bit.BTCNT;
-      }
+          _descPtr_->SRCADDR.reg += addr_mod(_descPtr_
+            ->BTCTRL.bit.STEPSEL == DMAC_BTCTRL_STEPSEL_SRC_Val);
+          _descPtr_->DSTADDR.reg += addr_mod(_descPtr_
+            ->BTCTRL.bit.STEPSEL == DMAC_BTCTRL_STEPSEL_DST_Val);
 
-      inline void set_suspend_channel(const bool &value,
-        const bool &updateActive = DMA_DEF_UPDATE_ACTIVE) {
-        auto crit = _CritTaskSection_(_assigCH_);
-        auto baVal = value ? DMAC_BTCTRL_BLOCKACT_SUSPEND_Val 
-          : DMAC_BTCTRL_BLOCKACT_NOACT_Val;
-        
-        _descPtr_->BTCTRL.bit.BLOCKACT = baVal;
-        if (updateActive && _is_writeback_()) {
-          wbDescArray[_assigCH_].BTCTRL.bit.BLOCKACT = baVal;
+          if (update_wb && _is_writeback_()) {
+            if (wbDescArray[_assigCH_].BTCNT.reg 
+              - (cbytes - prev) > 0) {
+              wbDescArray[_assigCH_].BTCNT.reg += (cbytes - prev);
+            } else {
+              wbDescArray[_assigCH_].BTCNT.reg = 0;
+            }
+          }
         }
       }
 
-      inline bool get_suspend_channel(void) {
+
+      /// \b DONE-DONE
+
+      constexpr unsigned int get_transfer_size(void) const noexcept {
+        return _descPtr_->BTCNT.reg;
+      }
+
+
+      /// \b DONE-DONE
+
+      constexpr void set_suspend_channel(const bool &value) noexcept {
+            auto res = value 
+              ? DMAC_BTCTRL_BLOCKACT_SUSPEND_Val
+              : DMAC_BTCTRL_BLOCKACT_NOACT_Val;
+        _descPtr_->BTCTRL.bit.BLOCKACT = res;
+        if (update_wb && _is_writeback_()) {
+          wbDescArray[_assigCH_].BTCTRL.bit.BLOCKACT = res;
+        }
+      }
+
+
+      /// \b DONE-DONE
+
+      constexpr bool get_suspend_channel(void) const noexcept {
         return _descPtr_->BTCTRL.bit.BLOCKACT 
           == DMAC_BTCTRL_BLOCKACT_SUSPEND_Val;
       }  
 
-      bool unlink(const bool &updateActive = DMA_DEF_UPDATE_ACTIVE) {
-        if (_assigCH_ != -1) {
+
+      /// \b DONE-DONE
+
+      constexpr bool reset(void) noexcept {
         auto crit = _CritTaskSection_(_assigCH_);
+        _cfgmsk_ = 0;
 
-          Task *prev = this;
-          while(prev->_linked_ && prev->_linked_ != this) {
-            prev = prev->_linked_;
-          }
-          // Handle case -> this = base task     
-          if (this == baseTaskArray[_assigCH_]) {
-            assert(baseDescBuffer[_assigCH_]);
-            _descPtr_ = std::exchange(baseDescBuffer[_assigCH_], nullptr);            
-   
-            if (_linked_ && _linked_ != this) { 
-              assert(_linked_->_assigCH_ == _assigCH_);
-              memcpy(&baseDescArray[_assigCH_], _linked_->_descPtr_, 
-                sizeof(DmacDescriptor));
-              baseDescBuffer[_assigCH_] = std::exchange(_linked_->_descPtr_, 
-                &baseDescArray[_assigCH_]);
-            } else {
-              memset(&baseDescArray[_assigCH_], 0, sizeof(DmacDescriptor));
-              if (updateActive && _is_writeback_()) {
-                wbDescArray[_assigCH_].DESCADDR.bit.DESCADDR 
-                  = DMAC_SRCADDR_RESETVALUE;
-              }
-            }
-          // Handle case -> this = within task list
-          } else {
-            assert(prev);
-            prev->_descPtr_->DESCADDR.bit.DESCADDR
-              = _descPtr_->DESCADDR.bit.DESCADDR;
-          }
-          _assigCH_ = -1;
-          _linked_ = nullptr;
-          _descPtr_->DESCADDR.bit.DESCADDR = DMAC_SRCADDR_RESETVALUE;
-        }
-        return true;
-      }
-
-      bool reset() {
-        auto crit = _CritTaskSection_(_assigCH_);
-        uintptr_t prevLink = _descPtr_->DESCADDR.bit.DESCADDR;
-
+        uintptr_t prevLink = _descPtr_->DESCADDR.reg;
         memset(_descPtr_, 0, sizeof(DmacDescriptor));
-        _descPtr_->DESCADDR.bit.DESCADDR = prevLink;
+        _descPtr_->DESCADDR.reg = prevLink;
 
-        if (_is_writeback_()) {
+        if (update_wb && _is_writeback_()) {
           memset(&wbDescArray[_assigCH_], 0, sizeof(DmacDescriptor));
           wbDescArray[_assigCH_].DESCADDR.bit.DESCADDR = prevLink;
         }
         return true;
       }
 
-      ~Task() {
+
+      /// \b DONE-DONE
+
+      constexpr ~Task() noexcept {
         if (_linked_) {
-          unlink(true);
-        }
-        if (_descPtr_) {
-          delete _descPtr_;
+          unlink();
         }
       }
 
-      template<typename src_t, typename dest_t, int incrSrc_v, 
-        int incrDest_v, int align_v> 
-      void set_location(const src_t __restrict *src, const dest_t __restrict *dest,
-        const int &incrSrc, const int &incrDest, const int &align)
-        requires _c_valid_explicit_loc_<src_t, dest_t, incrSrc_v, 
-          incrDest_v, align_v> {
-
-        auto crit = _CritTaskSection_(_assigCH_); 
-        _descPtr_->BTCTRL.bit.BEATSIZE = indexOf(align_v, bsRef);
-
-        // Set increment config
-        _descPtr_->BTCTRL.bit.STEPSEL = _srcIncr_ 
-          ? DMAC_BTCTRL_STEPSEL_SRC_Val : DMAC_BTCTRL_STEPSEL_DST_Val;
-        _descPtr_->BTCTRL.bit.STEPSIZE = DMAC_BTCTRL_STEPSIZE_X1_Val;
-
-        if constexpr (_srcIncr_ > 1) {
-          _descPtr_->BTCTRL.bit.STEPSIZE = indexOf(incrSrc_v, ssRef);
-        } else if constexpr (_destIncr_ > 1) {
-          _descPtr_->BTCTRL.bit.STEPSIZE = indexOf(incerDest_v, ssRef);
-        }
-        // Set src/dest address
-        _descPtr_->SRCADDR.bit.SRCADDR = mem_addr(src);
-        _descPtr_->DSTADDR.bit.DSTADDR = mem_addr(dest);
-        if constexpr (!std::is_volatile_v<src_t>) {
-          _descPtr_->SRCADDR.bit.SRCADDR += addr_mod(srcIncr > 1);
-        }
-        if constexpr (!std::is_volatile_V<dest_t>) {
-          _descPtr_->DSTADDR.bit.DSTADDR += addr_mod(destIncr > 1);
-        }
-      }
-
-      template<typename src_t, typename dest_t>
-      void set_location(const src_t __restrict *src, const dest_t __restrict *dest)
-        requires _c_valid_implicit_loc_<src_t, dest_t> {
-
-        auto crit = _CritTaskSection_(_assigCH_);
-        typedef std::remove_volatile_t<src_t> strip_src_t;
-        typedef std::remove_volatile_t<dest_t> strip_dest_t;
-
-        auto addr_mod = [this](const bool &e_stepsize) -> uintptr_t {
-          return _descPtr_->BTCNT.bit.BTCNT 
-            * (_descPtr_->BTCTRL.bit.BEATSIZE + 1) 
-            * (e_stepsize ? (1 << _descPtr_->BTCTRL.bit.STEPSIZE) : 1); 
-        };
-        
-        // Get & set alignment
-        static constexpr int commAlign =
-          !(sizeof(src_t) % bsRef[2]) && !(sizeof(dest_t) % bsRef[2]) ? 2 :
-          !(sizeof(src_t) % bsRef[1]) && !(sizeof(dest_t) % bsRef[1]) ? 1 : 0;
-        _descPtr_->BTCTRL.bit.BEATSIZE = commAlign;
-
-        // Set increment config
-        _descPtr_->BTCTRL.bit.SRCINC = std::is_array_v<strip_src_t> 
-          || sizeof(strip_src_t) < CFG_MIN_INCR_SIZE;
-
-        _descPtr_->BTCTRL.bit.DSTINC = std::is_array_v<strip_dest_t> 
-          || sizeof(strip_dest_t) < CFG_MIN_INCR_SIZE;
-
-        _descPtr_->BTCTRL.bit.STEPSIZE = DMAC_BTCTRL_STEPSIZE_X1_Val;
-        auto constexpr ssRes = [&]() consteval -> std::pair<int, int> {
-          if constexpr (sizeof(src_t) < sizeof(dest_t)) {
-
-            if constexpr (std::is_array_v<strip_src_t> 
-              && std::is_array_v<strip_dest_t> 
-              && sizeof(src_t) == bsRef[commAlign]) {
-
-              return std::make_pair(DMAC_BTCTRL_STEPSEL_DST_Val, 
-                indexOf(sizeof(dest_t) - sizeof(src_t), ssRef));
-
-            } else if constexpr (!std::is_array_v<src_t> 
-              && std::is_array_v<strip_dest_t>) {
-
-              return std::make_pair(DMAC_BTCTRL_STEPSEL_DST_Val, 
-                indexOf(sizeof(dest_t) - sizeof(src_t), ssRef));
-            }
-          }
-          return std::make_pair(0, 0);
-        }();
-        static_assert(ssRes.second != -1, 
-          "Internal error: Task type alignment.");
-        _descPtr_->BTCTRL.bit.STEPSEL = ssRes.first;
-        _descPtr_->BTCTRL.bit.STEPSIZE = ssRes.second;
-
-        // Set address -> if volatile do not apply addr modifier
-        _descPtr_->SRCADDR.bit.SRCADDR = mem_addr(src);
-        _descPtr_->DSTADDR.bit.DSTADDR = mem_addr(dest);
-        if constexpr (!std::is_volatile_v<src_t>) {
-          _descPtr_->SRCADDR.bit.SRCADDR += addr_mod(ssRes.first);
-        }
-        if constexpr (!std::is_volatile_v<dest_t>) {
-          _descPtr_->DSTADDR.bit.DSTADDR += addr_mod(ssRes.first);
-        }
-      }
-
-      void *get_source(void) {
-        if (_descPtr_->SRCADDR.bit.SRCADDR == DMAC_SRCADDR_RESETVALUE) {
-          return nullptr;
-        }
-        return (void*)_descPtr_->SRCADDR.bit.SRCADDR;
-      }
-
-      void *get_dest(void) {
-        if (_descPtr_->DSTADDR.bit.DSTADDR == DMAC_SRCADDR_RESETVALUE) {
-          return nullptr;
-        }
-        return (void*)_descPtr_->DSTADDR.bit.DSTADDR;
-      }
 
     private:
 
+      uint8_t _cfgmsk_ = 0; // bit 1 = src, bit 2 = dst
       uint8_t _assigCH_ = -1;
       Task *_linked_ = nullptr;
-      DmacDescriptor *_descPtr_ = nullptr;
+      DmacDescriptor *_descPtr_ = &_desc_;
+      DmacDescriptor _desc_{};
 
-      bool _is_writeback_() {
-        return _assigCH_ != -1 && wbDescArray[_assigCH_]
-          .DESCADDR.bit.DESCADDR == _descPtr_->DESCADDR.bit.DESCADDR;
+
+      /// \b DONE-DONE
+
+      constexpr bool _validCH_(void) const noexcept {
+        return _assigCH_ >= 0 && _assigCH_ < DMAC_CH_NUM;
       }
+
+
+      /// \b DONE
+
+      /// @internal
+      /// @brief 
+      ///   Determines if this task is currently written-back
+      ///   to it's assigned channel.
+      /// @return 
+      ///   True if written-back to assigned channnel. 
+      ///   False otherwise.
+      /// @note 
+      ///   Handles invalid channel index.      
+      constexpr bool _is_writeback_(void) const noexcept {
+        return !std::is_constant_evaluated() && _validCH_()
+          && wbDescArray[_assigCH_].DESCADDR.reg 
+            == _descPtr_->DESCADDR.reg;
+      }
+
+
+      /// \b DONE
+
+      constexpr unsigned int addr_mod(const bool &isSrc) const noexcept {
+        bool sel = _descPtr_->BTCTRL.bit.STEPSEL == (isSrc 
+          ? DMAC_BTCTRL_STEPSEL_SRC_Val : DMAC_BTCTRL_STEPSEL_DST_Val);
+        return _descPtr_->BTCNT.reg 
+        * (_descPtr_->BTCTRL.bit.BEATSIZE + 1) 
+        * (sel ? (1 << _descPtr_->BTCTRL.bit.STEPSIZE) : 1);
+      } 
+
+
+      /// \b TO-DO -> ADD "READY CHANNEL METHOD OR SOMETHING..."
 
   };  
 
 
 
-
   namespace {
 
-    /// @internal Used for Task.set_location (auto)
-    template<typename src_t, typename dest_t>
-    concept _c_valid_implicit_loc_ = requires {
-      std::is_trivially_copyable_v<std::decay_t
-        <std::remove_cvref_t<src_t>>> &&
-      std::is_trivially_copyable_v<std::decay_t
-        <std::remove_cvref_t<dest_t>>> &&
-      !std::is_reference_v<src_t> && 
-      !std::is_reference_v<dest_t> &&
-      !std::is_pointer_v<src_t> &&
-      !std::is_pointer_v<dest_t> &&
-      !std::is_unbounded_array_v<std::remove_cvref_t<src_t>> &&
-      !std::is_unbounded_array_v<std::remove_cvref_t<dest_t>>; 
+
+    /// \b DONE-DONE
+
+    /// @internal
+    /// @brief 
+    ///   Concept used for validating implicit task
+    ///   location parameters.
+    /// @link 
+    ///   Task.set_location
+    template<typename T>
+    concept task_loc_t = requires { 
+       std::is_trivially_copyable_v<std::decay_t<std::remove_cvref_t<T>>>;
+      !std::is_unbounded_array_v<std::remove_cvref_t<T>>;
+      !std::is_reference_v<T>;
+      !std::is_pointer_v<T>;
     };
 
-    /// @internal Used for Task.set_location (specified)
-    template<typename src_t, typename dest_t, int incrSrc_v, 
-      int incrDest_v, int align_v>
-    concept _c_valid_explicit_loc_ = requires {
-      incrSrc_v >= 0 && 
-      incrDest_v >= 0 &&
-      align_v >= 0 &&
-      indexOf(incrSrc_v, ssRef) != -1 &&
-      indexOf(incrDest_v, ssRef) != -1 &&
-      indexOf(align_v, bsRef) != -1 &&
-      ((incrSrc_v > 1) & (incrDest_v > 1) == 0) &&
-      !std::is_reference_v<src_t> &&
-      !std::is_reference_v<dest_t> &&
-      !std::is_pointer_v<src_t> &&
-      !std::is_pointer_v<dest_t>;
+
+    /// \b DONE-DONE
+
+    /// @internal 
+    /// @brief
+    ///   Concept used for validating increment values
+    ///   for task source & destination
+    /// @link
+    ///   Task.set_location
+    template<int src_incr, int dst_incr>
+    concept task_incr_valid = requires (int src_fn, int dst_fn) {
+      src_incr == src_fn && dst_incr == dst_fn;
+      src_incr <= 1 || dst_incr <= 1;
+      src_incr >= -1 && dst_incr >= -1;
+      []() consteval {
+        int valid_n = 0;
+        for (int i = 0; i < std::size(ss_ref); i++) {
+          valid_n += std::abs(src_incr) == ss_ref[i]  
+            + std::abs(dst_incr) == ss_ref[i];
+        }
+        return valid_n >= 2;
+      }();
     };
 
+
+    /// \b NOT-DONE -> CANNOT ACCESS IO FROM CONSTEXPR
+
+    /// @internal
+    /// @brief 
+    ///   On construction, this object ensures that the
+    ///   specified channel is suspended and on destruction
+    ///   it returns the channel back to it's initial state.
+    /// @note 
+    ///    Multiple instances for the same index is handled.
+    /// @note 
+    ///   Invalid channel index parameter is handled.
     class _CritTaskSection_ {
       public:
-        _CritTaskSection_(int _index_) : _index_(std::move(_index_)) {
-          if ((_index_ < 0 || _index_ >= DMAC_CH_NUM) 
-            && !DMAC->Channel[_index_].CHINTFLAG.bit.SUSP) {
+        constexpr _CritTaskSection_(int index) noexcept : _index_(index),
+          _pstate_(_valid_index_() && (DMAC->Channel[_index_].CHINTFLAG.reg
+            & DMAC_CHINTFLAG_SUSP)) 
+        {
+          if (!std::is_constant_evaluated() && _valid_index_() && _pstate_) {
 
             DMAC->Channel[_index_].CHCTRLB.bit.CMD 
               = DMAC_CHCTRLB_CMD_SUSPEND_Val;
-              
-            _critStateMask_ |= (1 << _index_);
-              while(DMAC->Channel[_index_].CHCTRLB.bit.CMD 
-                == DMAC_CHCTRLB_CMD_SUSPEND_Val);
+            while(DMAC->Channel[_index_].CHCTRLB.bit.CMD 
+              == DMAC_CHCTRLB_CMD_SUSPEND_Val);
           }
         }
-        ~_CritTaskSection_() {
-          if ((_index_ < 0 || _index_ >= DMAC_CH_NUM) && _critStateMask_ 
-              & (1 << _index_)) {
+        constexpr ~_CritTaskSection_() noexcept {
+          if (!std::is_constant_evaluated() && _index_ >= 0 
+            && _index_ < DMAC_CH_NUM && !_pstate_) {
+
             DMAC->Channel[_index_].CHCTRLB.bit.CMD 
               = DMAC_CHCTRLB_CMD_RESUME_Val;
-            _critStateMask_ &= ~(1 << _index_);
           }
         }
+
       private:
+        const bool _pstate_ = false;
         const int _index_ = -1;
-        static inline uint32_t _critStateMask_ = 0;
+
+        constexpr bool _valid_index_(void) {
+          return _index_ >= 0 && _index_ < DMAC_CH_NUM;
+        }
     };
+  
 
+    /// \b DONE-DONE-DONE
 
+    enum class cpyact { copy, move, swap };
+    constexpr void _cpydesc(DmacDescriptor __restrict *into, DmacDescriptor __restrict *from,
+      const cpyact &act) noexcept {
 
-
-
+      if (std::is_constant_evaluated()) {
+        auto const_cpy = [&into, &from]() -> void {
+          into->BTCNT.reg = from->BTCNT.reg;
+          into->BTCTRL.reg = from->BTCTRL.reg;
+          into->DESCADDR.reg = from->DESCADDR.reg;
+          into->DSTADDR.reg = from->DSTADDR.reg;
+          into->SRCADDR.reg = from->SRCADDR.reg;
+        };
+        auto const_from_set = [&from]() -> void {
+            from->BTCNT.reg = 0;
+            from->BTCTRL.reg = 0;
+            from->DESCADDR.reg = 0;
+            from->DSTADDR.reg = 0;
+            from->SRCADDR.reg = 0;
+        };
+        switch(act) {
+          case cpyact::copy: {
+            const_cpy();
+          }
+          case cpyact::move: {
+            const_cpy();
+            const_from_set();
+          }
+          case cpyact::swap: {
+            auto _1 = into->BTCNT.reg;
+            auto _2 = into->BTCTRL.reg;
+            auto _3 = into->DESCADDR.reg;
+            auto _4 = into->DSTADDR.reg;
+            auto _5 = into->SRCADDR.reg;
+            const_cpy();
+            from->BTCNT.reg = _1;
+            from->BTCTRL.reg = _2;
+            from->DESCADDR.reg = _3;
+            from->DSTADDR.reg = _4;
+            from->SRCADDR.reg = _5;
+          }
+        }
+      } else {
+        switch(act) {
+          case cpyact::copy: {
+            memcpy(into, from, sizeof(DmacDescriptor));
+          }
+          case cpyact::move: {
+            memmove(into, from, sizeof(DmacDescriptor));
+            memset(from, 0, sizeof(DmacDescriptor));
+          }
+          case cpyact::swap: {
+            uint32_t buff[sizeof(DmacDescriptor) / sizeof(uint32_t)];
+            memcpy(&buff, into, sizeof(DmacDescriptor)); 
+            memmove(into, from, sizeof(DmacDescriptor));
+            memmove(from, buff, sizeof(DmacDescriptor));  
+          }
+        }
+      }
+    }
 
 
 
 
   }
-
 }
 
 
