@@ -1,7 +1,8 @@
 {
   "files.associations": {
     "version": "cpp",
-    "executor": "cpp"
+    "executor": "cpp",
+    "new": "cpp"
   },
   "C_Cpp.errorSquiggles": "enabled"
 }

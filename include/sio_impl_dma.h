@@ -9,12 +9,18 @@
 #include <memory>
 
 namespace sio::impl::dma {
-  
+
+  /// @internal Reference   
+  #define CFGMSK_SRC_POS 0
+  #define CFGMSK_DST_POS 1
+  #define DEFAULT_IRQ_PRIORITY 0
 
   /// @internal Hardware constants
   #define update_wb true
   #define DMA_DEF_CH_PRILVL 2
   #define DMA_DEF_CH_RUN_STBY false
+  #define DMA_DEF_CH_LOOPED false
+
   static constexpr uint8_t bs_ref[] = {1, 2, 4};  
   static constexpr uint8_t ss_ref[] = {1, 2, 4, 8, 16, 32, 62, 128};
 
@@ -32,7 +38,8 @@ namespace sio::impl::dma {
     none,
     transfer_error,
     task_error,
-    crc_error
+    crc_error,
+    invalid_index
   };
   enum class transfer_mode {};
   enum class channel_peripheral : int {};
@@ -47,62 +54,59 @@ namespace sio::impl::dma {
 
 
   typedef struct active_channel_t {
-    static _aInline int index(void) {
+
+    /// \b DONE
+
+    static _aInline int index(void) noexcept {
       return DMAC->ACTIVE.bit.ID;
     }
-    static _aInline int remaining_bytes(void) {
+    static _aInline int remaining_bytes(void) noexcept {
       return DMAC->ACTIVE.bit.BTCNT 
         * wbDescArray[index()].BTCTRL.bit.BEATSIZE;
     }
-    static _aInline int is_busy(void) { // TO DO -> Is there a better method we could have here?
+    static _aInline int is_busy(void) noexcept {  // TO DO -> Is there a better method we could have here?
       return DMAC->ACTIVE.bit.ABUSY;
     }
   };
-  inline active_channel_t active_channel;
+  active_channel_t active_channel;
 
 
-  ///////// RECALL -> ENSURE _index_ = -1 handled for all methods
+
   class Channel {
 
     public:
     
+      /// \b DONE
+
+
       /// @brief Default constructor.
       /// @note Uses next available DMA channel. If no channels
       ///   are available -> object is in undefined state.
-      Channel() {
+      Channel() noexcept {
         static const uintptr_t baseAddr = mem_addr(baseDescArray);
         static const uintptr_t wbAddr = mem_addr(wbDescArray);
 
+        // If first channel -> Init DMAC peripheral
         if (!_challoc_mask_) { 
-          if (DMAC->BASEADDR.bit.BASEADDR == baseAddr
-            && DMAC->WRBADDR.bit.WRBADDR == wbAddr
-            && !DMAC->CTRL.bit.DMAENABLE) {
-            DMAC->CTRL.bit.DMAENABLE;
-            return;
-          }
-          DMAC->CTRL.bit.DMAENABLE = 0; 
-            while(DMAC->CTRL.bit.DMAENABLE);
-          DMAC->CRCCTRL.reg &= ~DMAC_CRCCTRL_MASK;
-          DMAC->CTRL.bit.SWRST = 1;
-            while(DMAC->CTRL.bit.SWRST);
-
+          _reset_dmac_();
           for (int i = 0; i < DMAC_LVL_NUM; i++) {
-            NVIC_SetPriority((IRQn_Type)(DMAC_0_IRQn + i), 
-              sio::impl::dma::sys_config.prilvl_irq_priority[i]);
-            NVIC_EnableIRQ((IRQn_Type)(DMAC_0_IRQn + i));
-            
+            NVIC_ClearPendingIRQ(static_cast<IRQn_Type>(DMAC_0_IRQn + i));
+            NVIC_SetPriority(static_cast<IRQn_Type>(DMAC_0_IRQn + i), 
+              sys_config.prilvl_irq_priority[i]);
+            NVIC_EnableIRQ(static_cast<IRQn_Type>(DMAC_0_IRQn + i));
+
             DMAC->PRICTRL0.reg |=
-              (sio::impl::dma::sys_config.prilvl_rr_arb[i] 
+              (sys_config.prilvl_rr_arb[i] 
               << (DMAC_PRICTRL0_RRLVLEN0_Pos + i * 8)) |
-              (sio::impl::dma::sys_config.prilvl_service_quality[i] 
+              (sys_config.prilvl_service_quality[i] 
               << (DMAC_PRICTRL0_QOS0_Pos + i * 8));
           }
           DMAC->BASEADDR.reg = baseAddr;
           DMAC->WRBADDR.reg = wbAddr;
-          DMAC->CTRL.reg |= DMAC_CTRL_LVLEN_Msk;
           MCLK->AHBMASK.bit.DMAC_ = 1;
           DMAC->CTRL.bit.DMAENABLE = 1;
         }
+        // "Allocate" & reset next available DMA channel
         for (int i = 0; i < DMAC_CH_NUM; i++) {
           if (_challoc_mask_ & (1 << i) == 0) {
             _challoc_mask_ |= (1 << i);
@@ -111,70 +115,81 @@ namespace sio::impl::dma {
           }
         }
       }
+
+
+      /// \b DONE
+
       /// @brief Move constructor -> swaps target channel.
       /// @param other Other channel object.
       /// @return Reference to this channel object.
-      Channel(Channel &&other) {
+      inline Channel(Channel &&other) noexcept {
         this->operator = (std::move(other)); 
       }
+
+
+      /// \b DONE
+
       /// @brief Move assignment operator -> swaps target channel.
       /// @param other Other channel object.
       /// @return Reference to this channel object. 
-      Channel &operator = (Channel &&other) noexcept {
-        if (other._index_ != _index_) {
+      inline Channel &operator = (Channel &&other) noexcept {
+        if (_index_ != other._index_) {
           std::swap(_index_, other._index_);
         }
       }
 
-      bool set_state(const channel_state &state) {
-        if (_index_ == -1) {
-          return false;
-        } else if (state == get_state()) {
-          return true;
-        }
-        switch(state) {
-          case channel_state::disabled: {
-            DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 0;
-              while(DMAC->Channel[_index_].CHCTRLA.bit.ENABLE);
-            DMAC->Channel[_index_].CHCTRLB.bit.CMD 
-              = DMAC_CHCTRLB_CMD_NOACT_Val;
-            DMAC->Channel[_index_].CHINTFLAG.bit.SUSP = 1;
-            return true;
-          }
-          case channel_state::idle: {
-            DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 0;
-              while(DMAC->Channel[_index_].CHCTRLA.bit.ENABLE);
-            DMAC->Channel[_index_].CHCTRLB.bit.CMD 
-              = DMAC_CHCTRLB_CMD_NOACT_Val;
-            DMAC->Channel[_index_].CHINTFLAG.bit.SUSP = 1;
-            DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 1;
-            return true;
-          }
-          case channel_state::suspended: {
-            DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 1;
-            DMAC->Channel[_index_].CHINTFLAG.bit.SUSP = 1;
-            DMAC->Channel[_index_].CHCTRLB.bit.CMD 
-              = DMAC_CHCTRLB_CMD_SUSPEND_Val;
-              while(!DMAC->Channel[_index_].CHINTFLAG.bit.SUSP);
-            return true;
-          }
-          case channel_state::active: {
-            DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 1;
-            DMAC->Channel[_index_].CHCTRLB.bit.CMD 
-              = DMAC_CHCTRLB_CMD_NOACT_Val;
-            DMAC->Channel[_index_].CHINTFLAG.reg 
-              = DMAC_CHINTFLAG_RESETVALUE;
-            DMAC->SWTRIGCTRL.reg |= (1 << _index_);
-            return true;
-          }
-          default: {
-            return false;
-          }
-        }
-      }
 
-      channel_state get_state(void) {
-        if (_index_ != -1) {
+      /// \b DONE
+
+      bool set_state(const channel_state &state) noexcept {
+        if (get_state() == state) {
+          return true;
+        } else if (_valid_index_()) {
+          switch(state) {
+            case channel_state::disabled: {
+              DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 0;
+                while(DMAC->Channel[_index_].CHCTRLA.bit.ENABLE);
+              DMAC->Channel[_index_].CHCTRLB.bit.CMD 
+                = DMAC_CHCTRLB_CMD_NOACT_Val;
+              DMAC->Channel[_index_].CHINTFLAG.bit.SUSP = 1;
+              return true;
+            }
+            case channel_state::idle: {
+              DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 0;
+                while(DMAC->Channel[_index_].CHCTRLA.bit.ENABLE);
+              DMAC->Channel[_index_].CHCTRLB.bit.CMD 
+                = DMAC_CHCTRLB_CMD_NOACT_Val;
+              DMAC->Channel[_index_].CHINTFLAG.bit.SUSP = 1;
+              DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 1;
+              return true;
+            }
+            case channel_state::suspended: {
+              DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 1;
+              DMAC->Channel[_index_].CHINTFLAG.bit.SUSP = 1;
+              DMAC->Channel[_index_].CHCTRLB.bit.CMD 
+                = DMAC_CHCTRLB_CMD_SUSPEND_Val;
+                while(!DMAC->Channel[_index_].CHINTFLAG.bit.SUSP);
+              return true;
+            }
+            case channel_state::active: {
+              DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 1;
+              DMAC->Channel[_index_].CHCTRLB.bit.CMD 
+                = DMAC_CHCTRLB_CMD_NOACT_Val;
+              DMAC->Channel[_index_].CHINTFLAG.reg 
+                = DMAC_CHINTFLAG_RESETVALUE;
+              DMAC->SWTRIGCTRL.reg |= (1 << _index_);
+              return true;
+            }
+          }
+        }
+        return false;
+      }
+      
+
+      /// \b COMPLETE
+
+      inline channel_state get_state(void) noexcept {
+        if (_valid_index_()) {
           if (!DMAC->Channel[_index_].CHCTRLA.bit.ENABLE) {
             return channel_state::disabled;
 
@@ -192,46 +207,65 @@ namespace sio::impl::dma {
         return channel_state::unknown;
       }
 
-      bool reset_transfer(void) {
-        if (_index_ == -1) {
-          return false;
+
+      /// \b COMPLETE
+
+      inline bool reset_transfer(void) noexcept {
+        if (_valid_index_()) {
+          set_state(channel_state::idle);
+          memdesc(&wbDescArray[_index_], nullptr, _memdesc::clear);
+          return true;
         }
-        auto crit = _CritTaskSection_(_index_);
-        memset(&wbDescArray[_index_], 0, sizeof(DmacDescriptor));
-        return true;
+        return false;
       }
 
-      bool reset_channel() {
-        if (_index_ == -1) {
-          return false;
+
+      /// \b COMPLETE
+
+      bool reset_channel() noexcept {
+        if (_valid_index_()) {
+          DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 0;
+            while(DMAC->Channel[_index_].CHCTRLA.bit.ENABLE);
+          DMAC->Channel[_index_].CHCTRLA.bit.SWRST = 1;
+            while(DMAC->Channel[_index_].CHCTRLA.bit.SWRST);
+
+          clear_tasks();
+          _looped_ = DMA_DEF_CH_LOOPED;
+          memdesc(&baseDescArray[_index_], nullptr, _memdesc::clear);
+          memdesc(&wbDescArray[_index_], nullptr, _memdesc::clear);
+          return true;
         }
-        DMAC->Channel[_index_].CHCTRLA.bit.ENABLE = 0;
-          while(DMAC->Channel[_index_].CHCTRLA.bit.ENABLE);
-        DMAC->Channel[_index_].CHCTRLA.bit.SWRST = 1;
-          while(DMAC->Channel[_index_].CHCTRLA.bit.SWRST);
-          
-        clear_tasks();
-        Task test1;
-        Task test2;
-        set_tasks(test1, test2);
-        memset(&baseDescArray[_index_], 0, sizeof(DmacDescriptor));
-        memset(&wbDescArray[_index_], 0, sizeof(DmacDescriptor));
-        return true;
+        return false;
       }
+
+
+      /// \b TO-DO
 
       template<Task&... _tasks_>
-      bool set_tasks(Task&...) { 
+      constexpr bool set_tasks(Task&...) noexcept { 
+        if constexpr ((_tasks_._assigCH_ == -1 && !_tasks_._linked_) || ...) {
+          ((_tasks_._linked_, _tasks_) = ... = _tasks_);
+          ((_tasks_._assigCH_ = _index_),...);
+        }
+      } 
+
+
+      /// \b TO-DO
+
+      bool clear_tasks(void); 
+
+
+      /// \b TO-DO
+
+      Task &get_current_task(void) { 
 
       }
 
-      bool clear_tasks(void); ////// TO DO 
 
-      _aInline Task &get_current_task(void) { // TO DO 
+      /// \b COMPLETE
 
-      }
-
-      channel_error get_error(void) {
-        if (_index_ != -1) {
+      inline channel_error get_error(void) noexcept {
+        if (_valid_index_()) {
           if (DMAC->Channel[_index_].CHINTFLAG.bit.TERR) {
             if (DMAC->Channel[_index_].CHSTATUS.bit.FERR) {
               return channel_error::task_error;
@@ -240,33 +274,40 @@ namespace sio::impl::dma {
           } else if (DMAC->Channel[_index_].CHSTATUS.bit.CRCERR) {
             return channel_error::crc_error;
           }
+          return channel_error::none;
         }
-        return channel_error::none; 
+        return channel_error::invalid_index;
       }
 
+
+      /// \b COMPLETE
+
       ~Channel() {
-        _challoc_mask_ &= ~(1 << _index_);
-        reset_channel();
-        if (_challoc_mask_ == 0) {
-          DMAC->CTRL.bit.DMAENABLE = 0;
+        if (_valid_index_()) {
+          _challoc_mask_ &= ~(1 << _index_);
+          reset_channel();
+        }
+        if (!_challoc_mask_) {
+          _reset_dmac_();
+          for (int i = 0; i < DMAC_LVL_NUM; i++) {
+            NVIC_ClearPendingIRQ(static_cast<IRQn_Type>(DMAC_0_IRQn + i));
+            NVIC_DisableIRQ(static_cast<IRQn_Type>(DMAC_0_IRQn + i));
+            NVIC_SetPriority(static_cast<IRQn_Type>(DMAC_0_IRQn + i), 
+              DEFAULT_IRQ_PRIORITY);
+          }
+          MCLK->AHBMASK.bit.DMAC_ = 0;
         }
       }
 
       struct {
 
-        // DMAC->Channel[_index_].CHCTRLA.bit.RUNSTDBY
-        //   = configGroup::chRunStandby[_index_];
-        // DMAC->Channel[_index_].CHPRILVL.bit.PRILVL
-        //   = configGroup::chPrilvl[_index_];
-        // DMAC->Channel[_index_].CHINTENSET.reg |=
-        //   ((int)errorCB << DMAC_CHINTENSET_TERR_Pos) |
-        //   ((int)transferCB << DMAC_CHINTENSET_TCMPL_Pos);
+        bool set_linked_peripheral(const channel_peripheral&);
+        channel_peripheral get_linked_peripheral(void) const;
 
-        bool linked_peripheral(const channel_peripheral&);
+        bool set_error_callback(error_int_t);
+        error_int_t get_error_callback(void);
 
-        // bool error_callback(error_cb_t);
-
-        // bool transfer_callback(transfer_cb_t);
+        bool transfer_callback(transfer_int_t);
 
         bool transfer_mode(const transfer_mode&);
 
@@ -280,15 +321,26 @@ namespace sio::impl::dma {
 
       bool _looped_ = false;
       int _index_ = -1;
+      static inline uint32_t constinit _challoc_mask_ = 0;
+
+      /// \b DONE
+
+      /// @internal 
+      /// @brief 
+      ///   Returns true if set index of this channel is valid.
+      bool _valid_index_() {
+        return _index_ >= 0 && _index_ < DMAC_CH_NUM;
+      }
+
+      void _reset_dmac_() {
+        DMAC->CTRL.bit.DMAENABLE = 0; 
+          while(DMAC->CTRL.bit.DMAENABLE);
+        DMAC->CRCCTRL.reg &= ~DMAC_CRCCTRL_MASK;
+        DMAC->CTRL.bit.SWRST = 1;
+          while(DMAC->CTRL.bit.SWRST);
+      }
 
   };
-
-
-  /////////////////////////////////////// TO DO -> ADD CHECKS FOR NULL TASK IN EVERY METHOD
-  //                                      AND ENSURE THAT THERE IS ALWAYS A NEW TASK IN THE BUFFER ARRAY
-    
-  #define CFGMSK_SRC_POS 0
-  #define CFGMSK_DST_POS 1
 
 
   class Task { 
@@ -296,39 +348,52 @@ namespace sio::impl::dma {
 
     public:
 
-
-      /// \b DONE-DONE-DONE
       /// /@brief Default constructor
       constexpr Task(void) = default;
 
 
-      /// \b DONE-DONE-DONE
-
-      /// @brief Copy constructor 
+      /// @brief Copy constructor
+      /// @param other Task to copy data from.
+      /// @note The assigned channel and linking configuration of the "other"
+      ///   given task will NOT be copied by this constructor.
       constexpr Task (const Task &other) noexcept { 
         this->operator=(other);
       } 
 
+
+      /// @brief 
+      ///   Copy constructor
+      /// @param other 
+      ///   Task to move into this one.
+      /// @note 
+      ///   The assigned channel and linking configuration of the "other"
+      ///   given task WILL be inhereted by constructor.
       constexpr Task (Task &&other) noexcept {
-        this->operator=(std::move_if_noexcept(other));
+        this->operator=(std::move(other));
       }
 
 
-      /// \b DONE
-
-      /// @brief Copy assignment operator.
+      /// @brief 
+      ///   Copy assignment operator.
+      /// @param other 
+      ///   Task to copy into this.
+      /// @return  
+      ///   A reference to this instance.
+      /// @note
+      ///   The assigned channel and linking configuration of the "orhter"
+      ///   given task are not copied by this method.
       constexpr Task &operator = (const Task &other) noexcept {
         if (this != &other) {
           auto crit = _CritTaskSection_(_assigCH_);
           _cfgmsk_ = other._cfgmsk_;
 
-          auto p_link = _descPtr_->DESCADDR.bit.DESCADDR;
-          _cpydesc(_descPtr_, other._descPtr_, cpyact::copy);
+          auto p_link = _descPtr_->DESCADDR.reg;
+          memdesc(_descPtr_, other._descPtr_, _memdesc::copy);
           _descPtr_->DESCADDR.reg = p_link;
 
           if (update_wb && _is_writeback_()) {
             auto pcount = wbDescArray[_assigCH_].BTCNT.reg;
-            _cpydesc(&wbDescArray[_assigCH_], _descPtr_, cpyact::copy);
+            memdesc(&wbDescArray[_assigCH_], _descPtr_, _memdesc::copy);
             wbDescArray[_assigCH_].BTCNT.reg = pcount;
           }
         }
@@ -336,13 +401,20 @@ namespace sio::impl::dma {
       }
 
 
-      /// \b DONE
-
+      /// @brief  
+      ///   Move assignment operator.
+      /// @param other 
+      ///   Other taks instance to be copied from.
+      /// @return 
+      ///   A reference to this object.
+      /// @note
+      ///   The assigned channel and linking configuration of the "other"
+      ///   given  task WILL be copied by this method. 
       constexpr Task &operator = (Task &&other) noexcept {
         if (this != &other) {
           // Avoid copy by re-assigning pointer (if base task)
           auto asgn_base = [](Task &base, Task &other) {
-            _cpydesc(&base._desc_, other._descPtr_, cpyact::move);
+            memdesc(&base._desc_, other._descPtr_, _memdesc::move);
             other._descPtr_ = _assign(base._descPtr_, &base._desc_);
             baseTaskArray[base._assigCH_] = &other;
           };
@@ -363,7 +435,7 @@ namespace sio::impl::dma {
             if (_validCH_() && this == _btask_[_assigCH_]) {
               asgn_base(*this, other);
             } else {
-              _cpydesc(_descPtr_, other._descPtr_, cpyact::swap);
+              memdesc(_descPtr_, other._descPtr_, _memdesc::swap);
             }
           }
           _swap(_assigCH_, other._assigCH_);
@@ -371,21 +443,21 @@ namespace sio::impl::dma {
       }
 
 
-
-      /// \b DONE-DONE
-
+      /// @brief 
+      ///   This method removes this task from it's assigned channel.
+      /// @note
       constexpr void unlink(void) noexcept {
         if (_validCH_()) {
           auto crit = _CritTaskSection_(_assigCH_);
-        
+
           // Handle case -> this = base descriptor
           if (this == _btask_[_assigCH_]) {
-            memmove(&_desc_, &baseDescArray[_assigCH_], sizeof(_desc_));
+            memdesc(&_desc_, &baseDescArray[_assigCH_], _memdesc::move);
             _descPtr_ = &_desc_;
             
             if (_linked_ && _linked_ != this) {
-              memmove(&baseDescArray[_assigCH_], _linked_->_descPtr_,
-                sizeof(_desc_));
+              memdesc(&baseDescArray[_assigCH_], _linked_->_descPtr_,
+                _memdesc::move);
               _linked_->_descPtr_ = &baseDescArray[_assigCH_];
               _btask_[_assigCH_] = _linked_;
             } else {
@@ -406,12 +478,11 @@ namespace sio::impl::dma {
             prev->_linked_ = _linked_;
             prev->_descPtr_->DESCADDR.reg = _descPtr_->DESCADDR.reg;
           }
-          // Must update writeback
-          if (_is_writeback_()) {
+          if (update_wb && _is_writeback_()) {
             wbDescArray[_assigCH_].DESCADDR.bit.DESCADDR
               = DMAC_SRCADDR_RESETVALUE;
             if (update_wb) {
-              memset(&wbDescArray[_assigCH_], 0, sizeof(_desc_));
+              memdesc(&wbDescArray[_assigCH_], nullptr, _memdesc::clear);
             }
           }
           _linked_ = nullptr;
@@ -421,13 +492,16 @@ namespace sio::impl::dma {
       }
 
 
+
+
+
       /// \b DONE-DONE
 
       template<task_loc_t src_t, task_loc_t dst_t, int src_incr_v = -1, 
         int dst_incr_v = -1>
       constexpr void set_location(const src_t __restrict &src, const dst_t 
-        __restrict &dst, const int& src_incr = -1, const int& dst_incr = -1) 
-        noexcept requires task_incr_valid<src_incr_v, dst_incr_v> {
+        __restrict &dst, const int& src_incr = -1, const int& dst_incr = -1) noexcept 
+        requires task_incr_valid<src_incr_v, dst_incr_v> {
           
         using src_rt = std::remove_all_extents_t<src_t>;
         using dst_rt = std::remove_all_extents_t<dst_t>;
@@ -524,14 +598,12 @@ namespace sio::impl::dma {
         // Update the writeback descriptor if applicable
         if (update_wb && _is_writeback_()) {
           auto pcount = wbDescArray[_assigCH_].BTCNT.reg;
-          memcpy(&wbDescArray[_assigCH_], _descPtr_, 
-            sizeof(_base_));
+          memdesc(&wbDescArray[_assigCH_], _descPtr_, 
+            _memdesc::copy);
           wbDescArray[_assigCH_].BTCNT.reg = pcount;
         }
       }
 
-
-      /// \b DONE-DONE
 
       void *get_source(void) const {
         auto addr = _descPtr_->SRCADDR.reg; 
@@ -542,7 +614,6 @@ namespace sio::impl::dma {
       }
 
 
-      /// \b DONE-DONE
 
       void *get_destination(void) const {
         auto addr = _descPtr_->DSTADDR.reg;
@@ -622,11 +693,11 @@ namespace sio::impl::dma {
         _cfgmsk_ = 0;
 
         uintptr_t prevLink = _descPtr_->DESCADDR.reg;
-        memset(_descPtr_, 0, sizeof(DmacDescriptor));
+        memdesc(_descPtr_, nullptr, _memdesc::clear);
         _descPtr_->DESCADDR.reg = prevLink;
 
         if (update_wb && _is_writeback_()) {
-          memset(&wbDescArray[_assigCH_], 0, sizeof(DmacDescriptor));
+          memdesc(&wbDescArray[_assigCH_], nullptr, _memdesc::clear);
           wbDescArray[_assigCH_].DESCADDR.bit.DESCADDR = prevLink;
         }
         return true;
@@ -638,6 +709,9 @@ namespace sio::impl::dma {
       constexpr ~Task() noexcept {
         if (_linked_) {
           unlink();
+          if (_validCH_() && !update_wb) {
+            memdesc(&wbDescArray[_assigCH_], nullptr, _memdesc::clear);
+          }
         }
       }
 
@@ -690,7 +764,6 @@ namespace sio::impl::dma {
       /// \b TO-DO -> ADD "READY CHANNEL METHOD OR SOMETHING..."
 
   };  
-
 
 
   namespace {
@@ -763,8 +836,7 @@ namespace sio::impl::dma {
           }
         }
         constexpr ~_CritTaskSection_() noexcept {
-          if (!std::is_constant_evaluated() && _index_ >= 0 
-            && _index_ < DMAC_CH_NUM && !_pstate_) {
+          if (!std::is_constant_evaluated() && _valid_index_() && !_pstate_) {
 
             DMAC->Channel[_index_].CHCTRLB.bit.CMD 
               = DMAC_CHCTRLB_CMD_RESUME_Val;
@@ -781,12 +853,13 @@ namespace sio::impl::dma {
     };
   
 
-    /// \b DONE-DONE-DONE
+    /// \b COMPLETE
 
-    enum class cpyact { copy, move, swap };
-    constexpr void _cpydesc(DmacDescriptor __restrict *into, DmacDescriptor __restrict *from,
-      const cpyact &act) noexcept {
+    enum class _memdesc { copy, move, swap, clear };
+    constexpr void memdesc(DmacDescriptor __restrict *into, DmacDescriptor
+      __restrict *from = nullptr, const _memdesc &act = _memdesc::clear) noexcept {
 
+      assert(into && (from || act == _memdesc::clear));
       if (std::is_constant_evaluated()) {
         auto const_cpy = [&into, &from]() -> void {
           into->BTCNT.reg = from->BTCNT.reg;
@@ -795,22 +868,22 @@ namespace sio::impl::dma {
           into->DSTADDR.reg = from->DSTADDR.reg;
           into->SRCADDR.reg = from->SRCADDR.reg;
         };
-        auto const_from_set = [&from]() -> void {
-            from->BTCNT.reg = 0;
-            from->BTCTRL.reg = 0;
-            from->DESCADDR.reg = 0;
-            from->DSTADDR.reg = 0;
-            from->SRCADDR.reg = 0;
+        auto clear = [](DmacDescriptor *targ) -> void {
+            targ->BTCNT.reg = 0;
+            targ->BTCTRL.reg = 0;
+            targ->DESCADDR.reg = 0;
+            targ->DSTADDR.reg = 0;
+            targ->SRCADDR.reg = 0;
         };
         switch(act) {
-          case cpyact::copy: {
+          case _memdesc::copy: {
             const_cpy();
           }
-          case cpyact::move: {
+          case _memdesc::move: {
             const_cpy();
-            const_from_set();
+            clear(from);
           }
-          case cpyact::swap: {
+          case _memdesc::swap: {
             auto _1 = into->BTCNT.reg;
             auto _2 = into->BTCTRL.reg;
             auto _3 = into->DESCADDR.reg;
@@ -823,26 +896,31 @@ namespace sio::impl::dma {
             from->DSTADDR.reg = _4;
             from->SRCADDR.reg = _5;
           }
+          case _memdesc::clear: {
+            clear(into);
+          }
         }
       } else {
         switch(act) {
-          case cpyact::copy: {
+          case _memdesc::copy: {
             memcpy(into, from, sizeof(DmacDescriptor));
           }
-          case cpyact::move: {
+          case _memdesc::move: {
             memmove(into, from, sizeof(DmacDescriptor));
             memset(from, 0, sizeof(DmacDescriptor));
           }
-          case cpyact::swap: {
+          case _memdesc::swap: {
             uint32_t buff[sizeof(DmacDescriptor) / sizeof(uint32_t)];
             memcpy(&buff, into, sizeof(DmacDescriptor)); 
             memmove(into, from, sizeof(DmacDescriptor));
             memmove(from, buff, sizeof(DmacDescriptor));  
           }
+          case _memdesc::clear: {
+            memset(into, 0, sizeof(DmacDescriptor));
+          }
         }
       }
     }
-
 
 
 

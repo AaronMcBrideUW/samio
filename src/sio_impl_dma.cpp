@@ -11,7 +11,6 @@ namespace sio::impl::dma {
     baseDescArray[DMAC_CH_NUM] = {};
 
   static constinit Task *_btask_[DMAC_CH_NUM] = { nullptr }; 
-  uint32_t constinit _challoc_mask_ = 0;
   
   /// \b GET_RID_OF:
   static constinit Task *baseTaskArray[DMAC_CH_NUM] = { nullptr }; 

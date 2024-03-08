@@ -22,36 +22,31 @@ namespace sio::impl::util {
   _aInline bool assert(const bool &cond) noexcept;
 
 
-  /// \b TO-DO -> EXPAND THIS FUNC -> ADD MUCH MORE 
-  ///      CHECKS & CASES...
-
- 
   template<typename T>
   constexpr T _swap(T &obj1, T &obj2) 
     noexcept(std::is_nothrow_swappable_v<T>)
-    requires requires { swap_c<T>; swap_c<T>; }
+                                              /// \b TO-DO->ADD_CONSTRAINTS
   {
-    std::swap()
-    T tmp = 
+    T temp = std::move(obj1);
+    obj1 = std::move(obj2);
+    obj2 = std::move(temp);
   }
 
-  template<typename T>
-  concept swap_c = requires(T &val) {
-    val = val;
-    val = std::as_const(val);
-    std::is_default_constructible_v<T>;
+  template<typename T1, typename T2 = T1>
+  constexpr T1 _assign(T1 &assignTo, T2 &&valueFrom) 
+    noexcept(std::is_nothrow_assignable_v<T1, T2>)
+                                                /// \b TO-DO->ADD_CONSTRAINTS
+  {
+    T1 temp = std::move(assignTo);
+    assignTo = std::forward<T2>(valueFrom);
+    return temp;
   }
-
-
-  /// \b TO-DO -> SAME AS ABOVE
-
   template<typename T1, typename T2>
-  constexpr T1 _assign(T1 &&assignTo, T2 &&valueFrom) noexcept {
-    auto asgBuff = assignTo;
-    assignTo = valueFrom;
-    return asgBuff;
-  }
-
+  concept assign_c = requires (T1 &val1, T2 &&val2, T1 &val1_test) {
+    std::is_assignable_v<T1, T2>;
+    val1_test = val1;
+    val1 = val2;
+  };
 
   /// \b NOT-DONE
 
@@ -75,12 +70,12 @@ namespace sio::impl::util {
   /// @param _value_ Target object of arbitrary type.
   /// @return A 32 bit unsigned integer.
   template<typename T>
-  uintptr_t mem_addr(const T &_value_) {
+  uintptr_t mem_addr(const T &_value_) noexcept {
     return reinterpret_cast<uintptr_t>(std::addressof(_value_));
   }
 
   template<typename T>
-  uintptr_t mem_addr(const T *&_value_) {
+  uintptr_t mem_addr(const T *&_value_) noexcept {
     return reinterpret_cast<uintptr_t>(_value_);
   }
 
