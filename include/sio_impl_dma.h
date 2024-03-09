@@ -76,7 +76,7 @@ namespace sio::impl::dma {
 
     public:
     
-      /// \b DONE
+      /// \b COMPLETE-3
 
 
       /// @brief Default constructor.
@@ -117,7 +117,7 @@ namespace sio::impl::dma {
       }
 
 
-      /// \b DONE
+      /// \b COMPLETE-3
 
       /// @brief Move constructor -> swaps target channel.
       /// @param other Other channel object.
@@ -127,7 +127,7 @@ namespace sio::impl::dma {
       }
 
 
-      /// \b DONE
+      /// \b COMPLETE-3
 
       /// @brief Move assignment operator -> swaps target channel.
       /// @param other Other channel object.
@@ -139,7 +139,7 @@ namespace sio::impl::dma {
       }
 
 
-      /// \b DONE
+      /// \b COMPLETE-3
 
       bool set_state(const channel_state &state) noexcept {
         if (get_state() == state) {
@@ -186,9 +186,9 @@ namespace sio::impl::dma {
       }
       
 
-      /// \b COMPLETE
+      /// \b COMPLETE-3
 
-      inline channel_state get_state(void) noexcept {
+      inline channel_state get_state(void) const noexcept {
         if (_valid_index_()) {
           if (!DMAC->Channel[_index_].CHCTRLA.bit.ENABLE) {
             return channel_state::disabled;
@@ -208,7 +208,7 @@ namespace sio::impl::dma {
       }
 
 
-      /// \b COMPLETE
+      /// \b COMPLETE-3
 
       inline bool reset_transfer(void) noexcept {
         if (_valid_index_()) {
@@ -220,7 +220,7 @@ namespace sio::impl::dma {
       }
 
 
-      /// \b COMPLETE
+      /// \b COMPLETE-3
 
       bool reset_channel() noexcept {
         if (_valid_index_()) {
@@ -239,26 +239,98 @@ namespace sio::impl::dma {
       }
 
 
-      /// \b TO-DO
+      /// \b NEEDS-CHECK
 
-      template<Task&... _tasks_>
-      constexpr bool set_tasks(Task&...) noexcept { 
-        if constexpr ((_tasks_._assigCH_ == -1 && !_tasks_._linked_) || ...) {
-          ((_tasks_._linked_, _tasks_) = ... = _tasks_);
-          ((_tasks_._assigCH_ = _index_),...);
+      template<Task* ..._tasks_> 
+      bool set_tasks(Task*...) noexcept {
+                
+
+
+      }
+
+
+      bool set_tasks(Task*...) noexcept {
+        
+
+        if constexpr (_valid_index_()) {
+          // Initialize array of valid tasks at compile time
+
+          for (auto&& task : taskArr) {
+            if (task->_assigCH_ != -1) {
+              task->unlink();
+            }
+          }
+          memdesc(&baseDescArray[_index_], taskArr[0]->_desc_, 
+            _memdesc::move);
+          taskArr[0]->_descPtr_ = &baseDescArray[_index_];
+          baseTaskArray[_index_] = taskArr[0];
+          
+          // Link links together (linked list)
+          if constexpr (sizeof...(_tasks_) > 1) {
+            int i = 0;
+            ((taskArr[i]->_assigCH_ = _index_, 
+              taskArr[i]->_linked_ = taskArr[i + 1],
+              taskArr[i]->_descPtr_.DESCADDR.reg 
+              = reinterpret_cast<uintptr_t>(taskArr[++i]->_descPtr_)
+            ),...);
+          } else {
+            taskArr[0]->_assigCH_ = _index_;
+          }
+          // Loop tasks (if specified)
+          if constexpr (sizeof...(_tasks_) > 0) {
+            if (_looped_) { 
+              taskArr[sizeof...(_tasks_) - 1]->_linked_ = taskArr[0];
+              taksArr[sizeof...(_tasks_) - 1]->_descPtr_.DESCADDR.reg  
+                = reinterpret_cast<uintptr_t>(taskArr[0]->_descPtr_);
+            }
+          }
         }
+        return (_valid_index_() && sizeof...(_tasks_) > 0);
       } 
 
 
-      /// \b TO-DO
+      /// \b COMPLETE -> Is this really constexpr??
 
-      bool clear_tasks(void); 
+      constexpr bool clear_tasks(void) noexcept {
+        if (_valid_index_() && _btask_[_index_]) {
+          Task *current = _btask_[_index_];
+          Task *next = nullptr;
+          bool bflag = true;
+
+          // Clear descriptor storage arrays
+          memdesc(&current->_desc_, &baseDescArray[_index_], 
+            _memdesc::move);
+          memdesc(&wbDescArray[_index_], nullptr, _memdesc::clear);
+          _btask_[_index_] = nullptr;
+          current->_descPtr_ = &current->_desc_;
+
+          while(current && (current != _btask_[0] || bflag)) {
+            bflag = false;
+            next = current->_linked_;
+            current->_assigCH_ = -1;
+            current->_linked_ = nullptr;
+            current = next;
+          }
+        }
+      }
 
 
-      /// \b TO-DO
 
-      Task &get_current_task(void) { 
+      /// \b COMPLETE
 
+      inline Task *get_current_task(void) { 
+        if (_valid_index_()) {
+          Task *current = baseTaskArray[_index_];
+          if (current) {
+            while(current && current != baseTaskArray[_index_]) {
+              if (current->_is_writeback_()) {
+                return current;
+              }
+              current = current->_linked_;
+            }
+          }
+        }
+        return nullptr;
       }
 
 
@@ -299,6 +371,9 @@ namespace sio::impl::dma {
         }
       }
 
+
+      /// \b TO-DO
+
       struct {
 
         bool set_linked_peripheral(const channel_peripheral&);
@@ -321,14 +396,14 @@ namespace sio::impl::dma {
 
       bool _looped_ = false;
       int _index_ = -1;
-      static inline uint32_t constinit _challoc_mask_ = 0;
+      static inline uint32_t _challoc_mask_ = 0;
 
       /// \b DONE
 
       /// @internal 
       /// @brief 
       ///   Returns true if set index of this channel is valid.
-      bool _valid_index_() {
+      bool _valid_index_() const {
         return _index_ >= 0 && _index_ < DMAC_CH_NUM;
       }
 
