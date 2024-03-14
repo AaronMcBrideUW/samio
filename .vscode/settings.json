@@ -54,7 +54,16 @@
     "streambuf": "cpp",
     "thread": "cpp",
     "cinttypes": "cpp",
-    "typeinfo": "cpp"
+    "typeinfo": "cpp",
+    "concepts": "cpp",
+    "span": "cpp",
+    "coroutine": "cpp",
+    "compare": "cpp",
+    "numbers": "cpp",
+    "any": "cpp",
+    "semaphore": "cpp",
+    "stop_token": "cpp",
+    "cstring": "cpp"
   },
   "C_Cpp.errorSquiggles": "enabled"
 }
