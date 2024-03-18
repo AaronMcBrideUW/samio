@@ -10,6 +10,8 @@
 #include <iterator>
 #include <string.h>
 #include <bit>
+#include <type_traits>
+#include <tuple>
 
 
 namespace sio::core {
@@ -67,6 +69,11 @@ namespace sio::core {
     static constexpr int crcpoly_ref[2]   = {16, 32};
     static constexpr int crc_src_shift  = 20;
     static constexpr int irq_pri_ref   = 1;
+    static constexpr std::pair<uintptr_t, uintptr_t> ram_addr_ref[] = {
+      {FLASH_ADDR, FLASH_ADDR + FLASH_SIZE}, 
+      {HSRAM_ADDR, HSRAM_ADDR + HSRAM_SIZE}, 
+      {BKUPRAM_ADDR, BKUPRAM_ADDR + BKUPRAM_SIZE}
+    };
   };
   
   struct SysModule {
@@ -142,6 +149,18 @@ namespace sio::core {
 
   };
 
+  struct DescriptorModule {
+  DescriptorModule &_ch_;
+
+    template<size_t N>
+    bool set_descriptors(TransferDescriptor (*descList)[N]) {
+      
+    };
+  
+
+      
+  };
+
 
 
   struct PrilvlModule {
@@ -202,28 +221,150 @@ namespace sio::core {
     }
   };
 
-  
+  using BM = BaseModule;
+  using length_t = decltype(std::declval<DmacDescriptor>().BTCNT.reg);
+
   struct TransferDescriptor {
     
-    void destination();
+    TransferDescriptor() noexcept {}
 
-    void length(const int &bytes) {
+    /// @b COMPLETE
+    template<typename src_t, int _incr_ = -1>
+    void source(src_t *src_ptr, int increment = -1) noexcept {
+      set_location<true, src_t, _incr_>(src_ptr); 
+    }
+    /// @b COMPLETE
+    void *source() const noexcept {
+      auto addr = _descPtr_->SRCADDR.reg - addr_mod(true);
+      return addr == DMAC_SRCADDR_RESETVALUE ? nullptr : (void*)addr;
+    }
 
-    };
+    /// @b COMPLETE
+    template<typename dst_t, bool _incr_ = -1>
+    void destination(dst_t *dst_ptr, int increment = -1) noexcept {
+      set_location<false, dst_t, _incr_>(dst_ptr); 
+    }
+    /// @b COMPLETE
+    void *destination() const noexcept {
+      auto addr = _descPtr_->DSTADDR.reg - addr_mod(false);
+      return addr == DMAC_SRCADDR_RESETVALUE ? nullptr : (void*)addr;
+    }
 
+    /// @b COMPLETE
+    bool length(const length_t &bytes) noexcept {
+      div_t div_res = std::div(bytes, BM::bs_ref[_descPtr_->BTCTRL.reg
+        & DMAC_BTCTRL_BEATSIZE_Msk]);
+      if (!div_res.rem) {
+        uintptr_t src_addr = _descPtr_->SRCADDR.reg - addr_mod(true);
+        uintptr_t dst_addr = _descPtr_->DSTADDR.reg - addr_mod(false);
 
-
-  };
-
-
-
-  struct DescriptorModule {
-    DescriptorModule &_ch_;
-
+        _descPtr_->BTCNT.reg = div_res.quot;
+        _descPtr_->SRCADDR.reg = src_addr + addr_mod(true);
+        _descPtr_->DSTADDR.reg = dst_addr + addr_mod(false);
+        return true;
+      }
+      return false;
+    }
+    /// @b COMPLETE
+    length_t length() const noexcept {
+      return _descPtr_->BTCNT.reg ? 0 : (_descPtr_->BTCNT.reg 
+        / BM::bs_ref[_descPtr_->BTCTRL.reg & DMAC_BTCTRL_BEATSIZE_Msk]);
+    }
     
+    /// @b COMPLETE
+    void suspend_mode(const bool &enabled) noexcept {
+      _descPtr_->BTCTRL.reg &= ~DMAC_BTCTRL_BLOCKACT_Msk;
+      _descPtr_->BTCTRL.reg |= enabled ? DMAC_BTCTRL_BLOCKACT_NOACT
+        : DMAC_BTCTRL_BLOCKACT_SUSPEND;
+    }
+    /// @b COMPLETE
+    bool suspend_mode() const noexcept {
+      return (_descPtr_->BTCTRL.reg & DMAC_BTCTRL_BLOCKACT_Msk)
+        == DMAC_BTCTRL_BLOCKACT_SUSPEND_Val;
+    }
 
-      
-  }; 
+
+
+    private:
+      __PACKED_STRUCT {
+        uint16_t _srcsize_;
+        uint16_t _dstsize_;
+        bool _srcmod_ = false;
+        bool _dstmod_ = false;
+      }_cfg_;
+      TransferDescriptor *_next_ = nullptr;
+      DmacDescriptor *_descPtr_ = &_desc_;
+      DmacDescriptor _desc_{};
+
+      /// @b COMPLETE
+      template<bool _src_, typename loc_t, int _incr_>
+      void set_location(loc_t *loc_ptr) noexcept {
+
+        static auto src_info = std::make_tuple(DMAC_BTCTRL_SRCINC,
+          DMAC_BTCTRL_STEPSEL_SRC_Val,
+          &_descPtr_->SRCADDR.reg, &_cfg_._srcmod_, &_cfg_._srcsize_);
+        static auto dst_info = std::make_tuple(DMAC_BTCTRL_DSTINC,
+          DMAC_BTCTRL_STEPSEL_DST_Val,
+          &_descPtr_->DSTADDR.reg, &_cfg_._dstmod_, &_cfg_._dstsize_);
+        auto&& [inc_msk, sel_val, addr_reg, mod_var, size_var]
+          = _src_ ? src_info : dst_info;
+
+        *size_var = sizeof(loc_t);
+        for (int i = std::size(BM::bs_ref) - 1; i >= 0; i--) {
+          auto bs = BM::bs_ref[i];
+          if (!(_cfg_._srcmod_ % bs) && !(_cfg_._dstsize_ % bs)) {
+            _descPtr_->BTCTRL.reg &= ~DMAC_BTCTRL_BEATSIZE_Msk;
+            _descPtr_->BTCTRL.reg |= (i << DMAC_BTCTRL_BEATSIZE_Pos); 
+            break;
+          }
+        }
+        if constexpr ((_incr_ < 0 && std::is_array_v<loc_t>) 
+          || _incr_ > 0) {
+          _descPtr_->BTCTRL.reg |= inc_msk;
+        } else {
+          _descPtr_->BTCTRL.reg &= inc_msk;
+        }
+        if constexpr (_incr_ > 1) { 
+          constexpr unsigned int step_r = std::distance(std::begin(BM::ss_ref),
+            std::find(std::begin(BM::ss_ref), std::end(BM::ss_ref), 
+              _incr_ * sizeof(loc_t)));
+          if constexpr (step_r < std::size(BM::ss_ref)) {
+            _descPtr_->BTCTRL.reg &= ~DMAC_BTCTRL_STEPSEL;
+            _descPtr_->BTCTRL.reg |= (sel_val << DMAC_BTCTRL_STEPSEL_Pos);
+
+            _descPtr_->BTCTRL.reg &= ~DMAC_BTCTRL_STEPSIZE_Msk;
+            _descPtr_->BTCTRL.reg |= (step_r << DMAC_BTCTRL_STEPSEL_Pos);
+          }          
+        } else if ((_descPtr_->BTCTRL.reg & DMAC_BTCTRL_STEPSEL) == sel_val) {
+          _descPtr_->BTCTRL.reg &= ~DMAC_BTCTRL_STEPSIZE_Msk;
+        }
+        *mod_var = false;
+        uintptr_t addr = std::bit_cast<uintptr_t>(loc_ptr);
+        for (auto&& [start_addr, end_addr] : BM::ram_addr_ref) {
+          if (addr >= start_addr && addr < end_addr) {
+            *mod_var = true; break;
+          }
+        }
+        *addr_reg = addr + addr_mod(_src_);
+      }
+
+      /// @b COMPLETE
+      unsigned int addr_mod(const bool &is_src) const noexcept {
+        if (is_src ? _cfg_._srcmod_ : _cfg_._dstmod_) {
+          bool sel = (_descPtr_->BTCTRL.reg & DMAC_BTCTRL_STEPSEL) == is_src 
+            ? DMAC_BTCTRL_STEPSEL_SRC_Val : DMAC_BTCTRL_STEPSEL_DST_Val; 
+
+          return _descPtr_->BTCNT.reg * (_descPtr_->BTCTRL.bit.BEATSIZE + 1)
+          * (sel ? (1 << _descPtr_->BTCTRL.bit.STEPSIZE) : 1);
+        }
+        return 1;
+      }
+
+
+
+
+  }
+
 
   struct ChannelModule {
     using enum CHANNEL_STATE;
