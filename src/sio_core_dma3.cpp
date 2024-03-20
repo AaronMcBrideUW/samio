@@ -303,18 +303,17 @@ using namespace sio::core;
       == DMAC_BTCTRL_BLOCKACT_SUSPEND_Val;
   }
 
-  
-  inline DescriptorModule *TransferDescriptor::assigned_list() const noexcept {
+  ChannelModule *TransferDescriptor::assigned_channel() const noexcept {
     return _assig_;
   }
 
-  
-  inline void TransferDescriptor::unlink() noexcept {
+  void TransferDescriptor::unlink() noexcept {
     if (_assig_) {
-      _assig_->remove(*this);
+      
+
+
     }
   }
-
   
   TransferDescriptor::~TransferDescriptor() noexcept {
     if (_assig_) {
@@ -411,255 +410,52 @@ using namespace sio::core;
   }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-//// SECTION: DESCRIPTOR LIST METHODS
+//// SECTION: CHANNEL METHODS
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-    bool DescriptorModule::set(TransferDescriptor **desc_list,
-      const size_t &length) noexcept {
-      if (length > 0) {
-        for (int i = 0; i < length; i++) {
-          if (!desc_list[i]->_assig_) return false;
-        }
-        clear(true);    
-        auto crit = enter_critical(_base_, _index_);
-        // Set new base descriptor
-        memcpy(&_base_->_bdesc_[_index_], &desc_list[0]->_desc_, 
-          sizeof(DmacDescriptor));
-        desc_list[0]->_descPtr_ = &_base_->_bdesc_[_index_];
-        _base_->_btd_[_index_] = desc_list[0];
-
-        // Link all descriptors together
-        for (int i = 0; i < length - 1; i++) {
-          desc_list[i]->_assig_ = this;
-          desc_list[i]->_next_ = desc_list[i + 1];
-          desc_list[i]->_descPtr_->DESCADDR.reg 
-            = (uintptr_t)desc_list[i + 1]->_descPtr_;
-        }
-        // loop descriptors
-        if (_looped_) {
-          desc_list[length - 1]->_next_ = desc_list[0];
-          desc_list[length - 1]->_descPtr_->DESCADDR.reg 
-            = (uintptr_t)desc_list[0]->_descPtr_;
-        }
-        leave_critical(crit, _base_, _index_);
-        return true;
-      }
-      return false;
-    }
-
-  inline bool DescriptorModule::set(TransferDescriptor& desc) noexcept {
-    TransferDescriptor *desc_array[1] = { &desc };
-    return set(desc_array, 1);
-  }
-
-  bool DescriptorModule::add(const int &index, 
-    TransferDescriptor &targ) noexcept {
-    if (!targ._assig_) {
-      TransferDescriptor *prev = nullptr;
-      TransferDescriptor *targ_next = nullptr;
-      // Get previous & next descriptors 
-      if (index <= 0) {
-        if (_looped_) prev = get_last();
-        targ_next = get(index);
-      } else if (index >= size()) {
-        prev = get_last();
-        if (_looped_) targ_next = _base_->_btd_[_index_];
-      } else {
-        prev = get(index - 1);
-        targ_next = prev->_next_;
-      }
-      if (prev)  prev->_descPtr_->BTCTRL.reg &= ~DMAC_BTCTRL_VALID;
-      // Handle insert @ base
-      if (index <= 0) {
-        if (targ_next) {
-          memmove(&targ_next->_desc_, _base_->_btd_[_index_], 
-            sizeof(DmacDescriptor));
-          targ_next->_descPtr_ = &targ_next->_desc_;
-        }
-        memcpy(_base_->_btd_[_index_], &targ._desc_, 
-          sizeof(DmacDescriptor));
-        targ._descPtr_ = &_base_->_bdesc_[_index_];
-      }
-      // Update targ & previous
-      targ._assig_ = this;
-      targ._next_ = targ_next;
-      targ._descPtr_->DESCADDR.reg = targ_next 
-        ? (uintptr_t)targ_next->_descPtr_ : DMAC_SRCADDR_RESETVALUE;
-      if (prev) {
-        prev->_next_ = &targ;
-        prev->_descPtr_->DESCADDR.reg = (uintptr_t)targ._descPtr_;
-        update_valid(prev->_descPtr_);
-      }
-      // Update writeback
-      if (_base_->_wbdesc_[_index_].DESCADDR.reg 
-          == (uintptr_t)targ_next->_descPtr_) {
-        auto crit = enter_critical(_base_, _index_);
-        _base_->_wbdesc_[_index_].DESCADDR.reg = (uintptr_t)targ._descPtr_;
-        leave_critical(crit, _base_, _index_);
-      }
-      return true;
-    } 
-    return false;
-  }
-
-  TransferDescriptor *DescriptorModule::get(const int &index) noexcept {
-    if (index < 0) return nullptr;
-    TransferDescriptor *curr = _base_->_btd_[_index_];
-    for (int i = 0; i < index; i++) {
-      if (!curr->_next_ || curr->_next_ == _base_->_btd_[_index_]) {
-        return nullptr;
-      }
-      curr = curr->_next_;
-    }
-    return curr;
-  }
-
-  TransferDescriptor &DescriptorModule::operator [] (const int &index) 
-    noexcept {
-    TransferDescriptor *found = get(index);
-    if (!get(index)) {
-      found = _base_->_btd_[_index_]; 
-    }
-    return *found;
-  }
-
-  TransferDescriptor *DescriptorModule::get_last() noexcept {
-    TransferDescriptor *curr = _base_->_btd_[_index_];
-    while(curr->_next_ && curr->_next_ != _base_->_btd_[_index_]) {
-      curr = curr->_next_;
-    }
-    return curr;
-  }
-
-
-  TransferDescriptor *DescriptorModule::remove(const unsigned int &index) 
-    noexcept {
-    TransferDescriptor *prev = nullptr;
-    TransferDescriptor *targ = nullptr;
-    if (index < size() && index >= 0) {
-      if (!index) {
-        if (_looped_) prev = get_last();
-        targ = _base_->_btd_[_index_];
-      } else if (index) {
-        prev = get(index - 1);
-        targ = prev->_next_;
-      }
-      if (targ) {
-        if (prev) prev->_descPtr_->BTCTRL.reg &= ~DMAC_BTCTRL_VALID;
-        // Handle target @ base
-        if (!index) {
-            memmove(&targ->_desc_, &_base_->_bdesc_[_index_], 
-              sizeof(DmacDescriptor));
-            targ->_descPtr_ = &targ->_desc_;
-          if (targ->_next_) {
-            memcpy(&_base_->_bdesc_[_index_], targ->_next_->_descPtr_, 
-              sizeof(DmacDescriptor));
-            targ->_next_->_descPtr_ = &_base_->_bdesc_[_index_];
-          } else {
-            memset(&_base_->_bdesc_[_index_], 0, sizeof(DmacDescriptor));
-          }
-          _base_->_btd_[_index_] = targ->_next_;
-        }
-        // Re-link previous descriptor
-        if (prev) {
-          if (_base_->_wbdesc_[_index_].DESCADDR.reg 
-            == prev->_descPtr_->DESCADDR.reg) {
-            auto crit = enter_critical(_base_, _index_);
-            _base_->_wbdesc_[_index_].DESCADDR.reg 
-              = targ->_descPtr_->DESCADDR.reg;
-            leave_critical(crit, _base_, _index_);
-          }
-          prev->_next_ = targ->_next_;
-          prev->_descPtr_->DESCADDR.reg = targ->_descPtr_->DESCADDR.reg;
-        }
-        targ->_assig_ = nullptr;
-        targ->_next_ = nullptr;
-        targ->_descPtr_->DESCADDR.reg = DMAC_SRCADDR_RESETVALUE;
-        update_valid(prev->_descPtr_);
-      }
-    }
-    return targ;
-  }
-
-  inline void DescriptorModule::remove(TransferDescriptor &targ) noexcept {
-    remove(indexOf(targ));
-  }
-
-  void DescriptorModule::clear(const bool &clear_active) noexcept {
+  void ChannelModule::set_transfers(TransferDescriptor **desc_array, 
+    const size_t &length, const bool &looped) {
     TransferDescriptor *curr = _base_->_btd_[_index_];
     if (curr) {
-      auto crit = enter_critical(_base_, _index_);
-      // Remove base
-      memmove(&curr->_desc_, &_base_->_bdesc_[_index_], 
+      memcpy(&curr->_desc_, &_base_->_bdesc_[_index_],
         sizeof(DmacDescriptor));
       curr->_descPtr_ = &curr->_desc_;
       _base_->_btd_[_index_] = nullptr;
-
-      // Unlink all descriptors
+      
       bool first_flag = true;
       while(curr && (first_flag || curr != _base_->_btd_[_index_])) {
         first_flag = false;
         curr->_assig_ = nullptr;
+        curr->_next_ = nullptr;
         curr->_descPtr_->DESCADDR.reg = DMAC_SRCADDR_RESETVALUE;
-        curr = std::exchange(curr->_next_, nullptr);
-      }
-      // Update writeback descriptor link
-      if (clear_active) {
-        memset(&_base_->_wbdesc_[_index_], 0, sizeof(DmacDescriptor));
-        _base_->_reg_->Channel[_index_].CHCTRLA.reg &= ~DMAC_CHCTRLA_ENABLE;
-      } else {
-        leave_critical(crit, _base_, _index_);
-        _base_->_wbdesc_[_index_].DESCADDR.reg = DMAC_SRCADDR_RESETVALUE;
       }
     }
-  }
-
-  size_t DescriptorModule::size() const noexcept {
-    TransferDescriptor *curr = _base_->_btd_[_index_];
-    size_t count = 0;
-    while(curr && (!count || curr != _base_->_btd_[_index_])) {
-      count++;
-      curr = curr->_next_;
-    }
-    return count;
-  }
-
-  int DescriptorModule::indexOf(TransferDescriptor &targ) const noexcept {
-    TransferDescriptor *curr = _base_->_btd_[_index_];
-    int index = 0;      
-    while(curr && (!index || curr != _base_->_btd_[_index_])) {
-      if (curr == &targ) {
-        return index;
-      }
-      index++;
-      curr = curr->_next_;
-    }
-    return -1;
-  }
-  
-  void DescriptorModule::looped(const bool &enabled) noexcept {
-    if (enabled == _looped_) return;
-    _looped_ = enabled;
-    if (_base_->_btd_[_index_]) {
-      TransferDescriptor *end_desc = get_last();
-      if (enabled) {
-        end_desc->_next_ = _base_->_btd_[_index_];
-        end_desc->_descPtr_->DESCADDR.reg = (uintptr_t)end_desc;
-      } else {
-        end_desc->_next_ = nullptr;
-        end_desc->_descPtr_->DESCADDR.reg = DMAC_SRCADDR_RESETVALUE;
+    if (desc_array) { 
+    curr = nullptr;    
+      for (int i = 0; i < length; i++) {
+        if (desc_array[i]) {
+          if (desc_array[i]->_assig_) {
+            desc_array[i]->unlink();
+          }
+          if (!curr) { 
+            memcpy(&_base_->_bdesc_[_index_], &desc_array[i]->_desc_, 
+              sizeof(DmacDescriptor));
+            desc_array[i]->_descPtr_ = &_base_->_bdesc_[_index_];
+            _base_->_btd_[_index_] = desc_array[i];
+          } else { 
+            curr->_next_ = desc_array[i];
+            curr->_descPtr_->DESCADDR.reg = (uintptr_t)desc_array[i]->_descPtr_;
+          }
+          desc_array[i]->_assig_ = this;
+          curr = desc_array[i];
+        }
+      } 
+      if (looped) {
+        curr->_next_ = _base_->_btd_[_index_];
+        curr->_descPtr_->DESCADDR.reg = (uintptr_t)&_base_->_bdesc_[_index_];
       }
     }
   }
-
-  
-  inline bool DescriptorModule::looped() const noexcept {
-    return _looped_;
-  }
-
-///////////////////////////////////////////////////////////////////////////////////////////////////
-//// SECTION: CHANNEL METHODS
-///////////////////////////////////////////////////////////////////////////////////////////////////
 
   bool ChannelModule::state(const CHANNEL_STATE &value) noexcept {
     if (_base_->_reg_->Channel[_index_].CHINTENSET.reg < 2) {
@@ -753,7 +549,9 @@ using namespace sio::core;
 
     memset(&_base_->_wbdesc_[_index_], 0, sizeof(DmacDescriptor));
     memset(&_base_->_bdesc_[_index_], 0, sizeof(DmacDescriptor));
-    _desc_->clear(true);
+    
+
+    /// @b TO-DO -> clear descriptors
   }
 
   bool ChannelModule::queue_transfer(const int &index, const bool &forced) noexcept {
@@ -874,3 +672,48 @@ using namespace sio::core;
   inline void ChannelModule::interrupt_callback(ch_interrupt_t interrupt_fn) noexcept {
     _base_->_cbarray_[_index_] = interrupt_fn;
   }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//// SECTION: DESCRIPTOR LIST METHODS (TO BE REMOVED)
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+  // TransferDescriptor *DescriptorList::set_head(TransferDescriptor *targ) {
+  //   auto *curr = _assig_->_base_->_btd_[_assig_->_index_];
+  //   // Remove current base td
+  //   if (curr) {
+  //     memmove(&curr->_desc_, &_assig_->_base_->_bdesc_[_assig_->_index_],
+  //       sizeof(DmacDescriptor));
+  //     curr->_descPtr_ = &curr->_desc_;      
+  //   }
+  //   // Handle: assign target
+  //   if (targ) {
+  //     if (targ->_assigfn_) targ->_assigfn_(targ);
+  //     memcpy(&_assig_->_base_->_bdesc_[_assig_->_index_], &targ->_desc_,
+  //       sizeof(DmacDescriptor));
+  //     targ->_descPtr_ = &_assig_->_base_->_bdesc_[_assig_->_index_];
+  //     _assig_->_base_->_btd_[_assig_->_index_] = targ;
+  //   // Handle: Shift next td down
+  //   } else if (curr->_next_) {
+  //     memcpy(&_assig_->_base_->_bdesc_[_assig_->_index_], 
+  //       &curr->_next_->_desc_, sizeof(DmacDescriptor));
+  //     curr->_next_->_descPtr_ = &curr->_next_->_desc_;
+  //     _assig_->_base_->_btd_[_assig_->_index_] = curr->_next_;  
+  //   // Handle: clear base
+  //   } else {
+  //     memset(&_assig_->_base_->_bdesc_[_assig_->_index_], 0, 
+  //       sizeof(DmacDescriptor));
+  //     _assig_->_base_->_btd_[_assig_->_index_] = nullptr;
+  //   }
+  //   link_desc(curr, nullptr);
+  //   curr->_assigfn_ = nullptr;
+  //   return curr;
+  // }
+
+  // inline void DescriptorList::link_desc(TransferDescriptor *targ, 
+  //   TransferDescriptor *next) {
+  //   if (targ) {
+  //     targ->_next_ = next;
+  //     targ->_descPtr_->DESCADDR.reg = next ? (uintptr_t)next->_descPtr_ 
+  //       : DMAC_SRCADDR_RESETVALUE;
+  //   }
+  // }

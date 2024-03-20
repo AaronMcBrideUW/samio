@@ -148,9 +148,9 @@ namespace sio::core {
     inline void suspend_mode(const bool &enabled) noexcept;
     inline bool suspend_mode() const noexcept;
     
-    inline DescriptorModule *assigned_list() const noexcept;
-    
-    inline void unlink() noexcept;
+    ChannelModule *assigned_channel() const noexcept;
+
+    void unlink();
 
     ~TransferDescriptor() noexcept;
 
@@ -160,7 +160,7 @@ namespace sio::core {
       bool _srcmod_ = false;
       bool _dstmod_ = false;
     }_cfg_;
-    DescriptorModule *_assig_;
+    ChannelModule *_assig_ = nullptr;
     TransferDescriptor *_next_ = nullptr;
     DmacDescriptor *_descPtr_ = &_desc_;
     DmacDescriptor _desc_{};
@@ -171,56 +171,16 @@ namespace sio::core {
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //// SECTION: DESCRIPTOR MODULE DECLARATION
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-  struct DescriptorModule {
-    BaseModule *const _base_;
-    const int _index_;
-    bool _looped_ = false;
-
-    bool set(TransferDescriptor **desc_list, const size_t &length) noexcept;
-
-    template<int N>
-    inline bool set(TransferDescriptor *(desc_list)[N]) {
-      return set(desc_list, N);
-    }
-
-    template<TransferDescriptor& ...desc_list>
-    inline bool set(TransferDescriptor&...) noexcept {
-      TransferDescriptor *desc_array[sizeof...(desc_list)] = { (&desc_list)... };
-      return set(desc_array, sizeof...(desc_list));
-    }
-
-    inline bool set(TransferDescriptor& desc) noexcept;
-
-    bool add(const int &index, TransferDescriptor &targ) noexcept;
-
-    TransferDescriptor *get(const int &index) noexcept;
-
-    TransferDescriptor &operator [] (const int &index) noexcept;
-
-    TransferDescriptor *get_last() noexcept;
-
-    TransferDescriptor *remove(const unsigned int &index) noexcept;
-    inline void remove(TransferDescriptor &targ) noexcept;
-
-    void clear(const bool &clear_active) noexcept;
-
-    size_t size() const noexcept;
-
-    int indexOf(TransferDescriptor &targ) const noexcept;
-    
-    void looped(const bool &enabled) noexcept;
-    inline bool looped() const noexcept;
-  };
-
-  /// TO DO -> ADD CHECKING FOR BASE INIT
   
   struct ChannelModule {
     using enum CHANNEL_STATE;
     BaseModule *const _base_;
     DescriptorModule *const _desc_;
     const int _index_;
+    bool _looped_;
+
+    void set_transfers(TransferDescriptor**, const size_t&,
+      const bool &looped);
 
     bool state(const CHANNEL_STATE &value) noexcept;
     CHANNEL_STATE state() const noexcept;
@@ -254,6 +214,7 @@ namespace sio::core {
 
   #define init_seq ([]{static int i; return i++;}())
 
+  // Full package
   struct DmaPeripheral {
     DmaPeripheral(const int &index) : _index_(index) {} 
     const int _index_;
