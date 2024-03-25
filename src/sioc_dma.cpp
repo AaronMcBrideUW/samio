@@ -304,8 +304,9 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
         DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE = 1U;
       }
     }
-    if (cfg.mode != transfer_mode_e::null) 
+    if (cfg.mode != transfer_mode_e::null) {
       ch->CHCTRLA.bit.TRIGACT = (uint32_t)cfg.periph;
+    }
     return true;
   }
 
@@ -335,6 +336,7 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
     // ch->CHINTENSET.bit.TERR = 1U; -> CURRNETLY NOT WORKING
   }
 
+  /// @b FINAL_V1
   bool skip_suspend(const uint32_t &ch_index) {
     DmacChannel *ch = &DMAC->Channel[ch_index];
     if (!ch->CHCTRLA.bit.ENABLE || ch->CHINTFLAG.bit.SUSP) return false;
@@ -346,28 +348,30 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
 //// SECTION: TRANSFER DESCRIPTOR OBJ
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
+  /// @b FINAL_V1
   TransferDescriptor::TransferDescriptor(const TransferDescriptor &other) {
     this->operator = (other);
   } 
 
+  /// @b FINAL_V1
   TransferDescriptor::TransferDescriptor(TransferDescriptor &&other) {
     this->operator = (std::move(other));
   }
 
-  /// @b UPDATED
+  /// @b FINAL_V1
   TransferDescriptor &TransferDescriptor::operator = (const TransferDescriptor &other) {
     if (this == &other) return *this;
-    auto prev_link = _descPtr_->DESCADDR.reg;
     _descPtr_->BTCTRL.bit.VALID = 0U;
     
-    memcpy(_descPtr_, other._descPtr_, sizeof(DmacDescriptor));
+    auto prev_link = _descPtr_->DESCADDR.reg;
+    memcpy(_descPtr_, other._descPtr_, _dsize_);
     _descPtr_->DESCADDR.reg = prev_link;
+
     update_valid(_descPtr_);
     return *this;
   }
    
-
-  /// @b UPDATED
+  /// @b FINAL_V1
   TransferDescriptor &TransferDescriptor::operator = (TransferDescriptor &&other) {
     if (this == &other) return *this;
     if (_assig_ != -1) unlink();
@@ -399,29 +403,33 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
     return *this;
   }
 
+  /// @b FINAL_V1
   bool TransferDescriptor::set_config(const Config &cfg) {
-    if (cfg.src_inc <= 1 || cfg.dst_inc <= 1) return false;
+    if (cfg.src_inc > 1 && cfg.dst_inc > 1) return false;
     
-    unsigned int bs_r = std::distance(_beat_size_map_.begin(), 
-      std::find(_beat_size_map_.begin(), _beat_size_map_.end(), 
-        cfg.beat_size));
-
-    unsigned int ss_r = DMAC_BTCTRL_STEPSIZE_X1_Val;
-    if (std::max(cfg.src_inc, cfg.dst_inc) > 1) {
-      ss_r = std::distance(_step_size_map_.begin(), 
-        std::find(_step_size_map_.begin(), _step_size_map_.end(), 
-          std::max(cfg.src_inc, cfg.dst_inc)));
+    uint32_t beatsize_r = DMAC_BTCTRL_BEATSIZE_BYTE_Val;
+    if (cfg.beat_size >= 0) {
+      beatsize_r = std::distance(_beat_size_map_.begin(), std::find
+        (_beat_size_map_.begin(), _beat_size_map_.end(), cfg.beat_size));
+      if (beatsize_r == _beat_size_map_.size()) return false;
     }
-    if (bs_r == _beat_size_map_.size() 
-      || ss_r == _step_size_map_.size()) [[unlikely]] {
-      return false;
+    int32_t max_inc = std::max(cfg.src_inc, cfg.dst_inc); 
+    uint32_t stepsize_r = DMAC_BTCTRL_STEPSIZE_X1_Val;
+    if (max_inc > 1) {
+      stepsize_r = std::distance(_step_size_map_.begin(), std::find
+        (_step_size_map_.begin(), _step_size_map_.end(), max_inc));
+      if (stepsize_r >= _step_size_map_.size()) return false;
     }
     _descPtr_->BTCTRL.bit.VALID = 0U;
-    _descPtr_->BTCTRL.bit.SRCINC   = cfg.src_inc;
-    _descPtr_->BTCTRL.bit.DSTINC   = cfg.dst_inc;
-    _descPtr_->BTCTRL.bit.STEPSIZE = ss_r;
-    _descPtr_->BTCTRL.bit.STEPSEL  = cfg.src_inc > cfg.dst_inc
+    if (cfg.src_inc >= 0) _descPtr_->BTCTRL.bit.SRCINC   = cfg.src_inc;
+    if (cfg.dst_inc >= 0) _descPtr_->BTCTRL.bit.DSTINC   = cfg.dst_inc;
+    if (max_inc >= 0) _descPtr_->BTCTRL.bit.STEPSIZE = stepsize_r;
+    if (max_inc >= 0) _descPtr_->BTCTRL.bit.STEPSEL  = cfg.src_inc > cfg.dst_inc
       ? DMAC_BTCTRL_STEPSEL_SRC_Val : DMAC_BTCTRL_STEPSEL_DST_Val;
+
+    if (cfg.beat_size >= 0) _descPtr_->BTCTRL.bit.BEATSIZE = beatsize_r;
+    if (cfg.susp_ch >= 0) _descPtr_->BTCTRL.bit.BLOCKACT = cfg.susp_ch 
+      ? DMAC_BTCTRL_BLOCKACT_SUSPEND_Val : DMAC_BTCTRL_BLOCKACT_NOACT_Val;
 
     if (cfg.src != &detail::dummy_loc) [[likely]] {
       _descPtr_->SRCADDR.reg = cfg.src ? (uintptr_t)cfg.src 
@@ -431,12 +439,13 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
       _descPtr_->DSTADDR.reg  = cfg.dst ? (uintptr_t)cfg.dst
         + addr_mod(_descPtr_, false) : DMAC_SRCADDR_RESETVALUE;
     }
-    if (cfg.dst && cfg.src) update_valid(_descPtr_);
+    update_valid(_descPtr_);
     return true;
   }
 
+  /// @b FINAL_V1
   TransferDescriptor::Config TransferDescriptor::config() const {
-    uint32_t ss_v = _step_size_map_[_descPtr_->BTCTRL.bit.STEPSIZE];
+    uint32_t stepsize_v = _step_size_map_[_descPtr_->BTCTRL.bit.STEPSIZE];
     return Config{
       .src = _descPtr_->SRCADDR.reg == DMAC_SRCADDR_RESETVALUE ? nullptr
         : (void*)(_descPtr_->SRCADDR.reg - addr_mod(_descPtr_, true)),
@@ -444,33 +453,34 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
         : (void*)(_descPtr_->DSTADDR.reg - addr_mod(_descPtr_, false)),
 
       .src_inc = (int)(_descPtr_->BTCTRL.bit.SRCINC * _descPtr_
-        ->BTCTRL.bit.STEPSEL == DMAC_BTCTRL_STEPSEL_SRC_Val ? ss_v : 1),
+        ->BTCTRL.bit.STEPSEL == DMAC_BTCTRL_STEPSEL_SRC_Val ? stepsize_v : 1),
       .dst_inc = (int)(_descPtr_->BTCTRL.bit.DSTINC * _descPtr_
-        ->BTCTRL.bit.STEPSEL == DMAC_BTCTRL_STEPSEL_DST_Val ? ss_v : 1),
+        ->BTCTRL.bit.STEPSEL == DMAC_BTCTRL_STEPSEL_DST_Val ? stepsize_v : 1),
 
       .beat_size = (int)_beat_size_map_[_descPtr_->BTCTRL.bit.BEATSIZE],
-      .susp_ch = _descPtr_->BTCTRL.bit.BLOCKACT == DMAC_BTCTRL_BLOCKACT_SUSPEND_Val
+      .susp_ch = _descPtr_->BTCTRL.bit.BLOCKACT == DMAC_BTCTRL_BLOCKACT_SUSPEND_Val,
     };
   }
 
-  bool TransferDescriptor::set_length(const uint32_t &len, 
-    const bool &in_bytes) {
+  /// @b FINAL_V1
+  bool TransferDescriptor::set_length(const uint32_t &len, const bool &in_bytes) {
+    _descPtr_->BTCTRL.bit.VALID = 0U;
     uint32_t new_cnt = len * (in_bytes ? _beat_size_map_
       [_descPtr_->BTCTRL.bit.BEATSIZE] : 1);
-    if (new_cnt > max_td_length) return false;
 
-    uint32_t s_mod = addr_mod(_descPtr_, true);
-    uintptr_t d_mod = addr_mod(_descPtr_, false);
-    
-    _descPtr_->BTCTRL.bit.VALID = 0U;
-    _descPtr_->BTCNT.reg = new_cnt;
+    if (new_cnt < max_td_length) {
+      uint32_t s_mod = addr_mod(_descPtr_, true);
+      uintptr_t d_mod = addr_mod(_descPtr_, false);
 
-    _descPtr_->SRCADDR.reg += (addr_mod(_descPtr_, true) - s_mod);
-    _descPtr_->DSTADDR.reg += (addr_mod(_descPtr_, false) - d_mod);
+      _descPtr_->BTCNT.reg = new_cnt;
+      _descPtr_->SRCADDR.reg += (addr_mod(_descPtr_, true) - s_mod);
+      _descPtr_->DSTADDR.reg += (addr_mod(_descPtr_, false) - d_mod);
+    }
     update_valid(_descPtr_);
-    return true;
+    return new_cnt < max_td_length;
   }
 
+  /// @b FINAL_V1
   uint32_t TransferDescriptor::length(const bool &in_bytes) const {
     return _descPtr_->BTCNT.reg * (in_bytes ? _beat_size_map_
       [_descPtr_->BTCTRL.bit.BEATSIZE] : 1);
@@ -535,7 +545,10 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
   /// @b UPDATED
   void detail::set_transfer(const uint32_t &ch_index, TransferDescriptor
     **desc_list, const uint32_t &length, const bool &looped) {
-    auto crit = CriticalSection(ch_index);
+    DmacChannel *ch = &DMAC->Channel[ch_index];
+
+    // if (ch->CHSTATUS.bit.BUSY || ch->CHSTATUS.bit.PEND)
+
 
     if (_btd_[ch_index]) {
       TransferDescriptor *curr = _btd_[ch_index];
