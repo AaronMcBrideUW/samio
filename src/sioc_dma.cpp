@@ -35,8 +35,21 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
 //// SECTION: UTILITY FUNCTIONS 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
+  void clear_channel(const uint32_t &ch_index) {
+    DmacChannel *ch = &DMAC->Channel[ch_index];
+    ch->CHCTRLA.bit.ENABLE = 0U;
+      while(ch->CHCTRLA.bit.ENABLE);
+    ch->CHCTRLA.bit.SWRST = 1U;
+      while(ch->CHCTRLA.bit.SWRST);
+
+    set_transfer(ch_index, nullptr);
+    memset(&_bdesc_[ch_index], 0U, _dsize_);
+    memset(&_wbdesc_[ch_index], 0U, _dsize_);
+    _btd_[ch_index] = nullptr;
+  }
+
   bool update_valid(DmacDescriptor *desc_ptr) {
-    if (!desc_ptr) return false;
+    if (!desc_ptr) [[unlikely]] return false;
     uint8_t desc_valid = desc_ptr->SRCADDR.reg 
       && desc_ptr->DSTADDR.reg && desc_ptr->BTCNT.reg;
     desc_ptr->BTCTRL.bit.VALID = desc_valid;
@@ -117,11 +130,12 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
   void DMAC_4_Handler(void) [[irq, weak, alias("sioc::dma::DMAC_0_Handler")]];
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-//// SECTION: SYSTEM CONTROL FUNCTIONS 
+//// SECTION: SYSTEM CONTROL FUNCTIONS @
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
+  /// @b FINAL_V1
   int32_t allocate_channel() {
-    if (ch_msk == 0x0) {
+    if (ch_msk == 0x0) [[unlikely]] {
       /// Initialize DMA
       DMAC->Channel[0].CHCTRLA.bit.ENABLE = 0U;
         while(DMAC->Channel[0].CHCTRLA.bit.ENABLE);
@@ -161,24 +175,18 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
     for (uint32_t i = 0; i < DMAC_CH_NUM; i++) {
       if ((ch_msk & (1U << i)) == 0) {    
         ch_msk |= (1U << i);
-
-        DmacChannel *ch = &DMAC->Channel[i]; 
-        if (ch->CHCTRLA.reg != DMAC_CHCTRLA_RESETVALUE) {
-          reset_channel(i);
-        } 
-        ch->CHCTRLA.bit.RUNSTDBY = ch_run_in_standby[i];
-        ch->CHINTENSET.bit.TCMPL = 1U;
-        ch->CHINTENSET.bit.TERR  = 0U; 
+        reset_channel(i);
         return i;
       }
     }
     return -1;
   }
   
+  /// @b FINAL_V1
   bool free_channel(const uint32_t &ch_index) {
-    if ((ch_msk & (1U << ch_index)) == 0x0) return false;
+    if ((ch_msk & (1U << ch_index)) == 0x0) [[unlikely]] return false;
     ch_msk &= ~(1U << ch_index);
-    reset_channel(ch_index);
+    clear_channel(ch_index);
 
     if (ch_msk == 0x0) { // Un-initialize DMA 
       DMAC->CTRL.bit.DMAENABLE = 0U;
@@ -197,10 +205,12 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
     return true;
   }
 
+  /// @b FINAL_V1
   uint32_t free_channel_count() {
     return DMAC_CH_NUM - std::popcount(ch_msk);
   }
  
+  /// @b FINAL_V1
   int32_t active_channel_index() {
     return std::countr_zero(DMAC->BUSYCH.reg) - 1;
   }
@@ -209,6 +219,7 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
 //// SECTION: CHANNEL CONTROL FUNCTIONS 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
+  /// @b FINAL_V1
   bool set_channel_state(const uint32_t &ch_index, const channel_state_e &state) {
     if (DMAC->CTRL.bit.DMAENABLE == 0U) [[unlikely]] return false;
     if (channel_state(ch_index) == state) return true;
@@ -244,6 +255,7 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
     return true;
   }
 
+  /// @b FINAL_V1
   channel_state_e channel_state(const uint32_t &ch_index) {
     DmacChannel *ch = &DMAC->Channel[ch_index];
     if (ch->CHSTATUS.bit.BUSY) {
@@ -261,8 +273,8 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
     return channel_state_e::idle; 
   }
 
+  /// @b FINAL_V1
   bool set_channel_config(const uint32_t &ch_index, const ChannelConfig &cfg) {
-    auto crit = CriticalSection(ch_index);
     uint32_t burst_len_r = 0, pri_lvl_r = 0;
 
     if (cfg.burst_len >= 0) {
@@ -280,13 +292,24 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
     if (cfg.pri_lvl >= 0) ch->CHPRILVL.bit.PRILVL = pri_lvl_r;
     if (cfg.callback) _cbarr_[ch_index] = cfg.callback;
 
-    if (cfg.periph != linked_peripheral_e::null)
+    if (cfg.periph != linked_peripheral_e::null) {
+      bool en_flag =false;
+      if (DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE) {
+        en_flag = true;
+        DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE = 0U;
+        while(DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE);
+      }
       ch->CHCTRLA.bit.TRIGSRC = (uint32_t)cfg.mode;
+      if (en_flag) {
+        DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE = 1U;
+      }
+    }
     if (cfg.mode != transfer_mode_e::null) 
       ch->CHCTRLA.bit.TRIGACT = (uint32_t)cfg.periph;
     return true;
   }
 
+  /// @b FINAL_V1
   ChannelConfig channel_config(const uint32_t &ch_index) {
     DmacChannel *ch = &DMAC->Channel[ch_index];
     return ChannelConfig{
@@ -298,21 +321,18 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
     };
   }
 
+  /// @b FINAL_V1
   void reset_channel(const uint32_t &ch_index) {
     DmacChannel *ch = &DMAC->Channel[ch_index];
-    ch->CHCTRLA.bit.ENABLE = 0U;
-      while(ch->CHCTRLA.bit.ENABLE);
-    ch->CHCTRLA.bit.SWRST = 1U;
-      while(ch->CHCTRLA.bit.SWRST);
-    
-    set_transfer(ch_index, nullptr);
-    memset(&_wbdesc_[ch_index], 0, _dsize_);
-    memset(&_bdesc_[ch_index], 0, _dsize_);
+    clear_channel(ch_index);
 
     ch->CHCTRLA.bit.TRIGSRC = (uint32_t)ch_def_periph;
     ch->CHCTRLA.bit.TRIGACT = (uint32_t)ch_def_mode;
     ch->CHCTRLA.bit.BURSTLEN = (uint32_t)ch_def_burst_len;
     ch->CHPRILVL.bit.PRILVL = (uint32_t)ch_def_pri_lvl;
+
+    ch->CHINTENSET.bit.TCMPL = 1U;
+    // ch->CHINTENSET.bit.TERR = 1U; -> CURRNETLY NOT WORKING
   }
 
   bool skip_suspend(const uint32_t &ch_index) {
@@ -361,7 +381,7 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
 
       if (other._assig_ != -1) {
         TransferDescriptor *prev = _btd_[other._assig_];
-        while (prev->_next_ != &other) prev = prev->_next_; // Assert that previous is in fact found
+        while (prev->_next_ != &other) prev = prev->_next_; 
 
         prev->_descPtr_->BTCTRL.bit.VALID = 0U;
         prev->_descPtr_->DESCADDR.reg = (uintptr_t)&_desc_; 
@@ -491,7 +511,7 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
       prev->_descPtr_->DESCADDR.reg = _descPtr_->DESCADDR.reg;
 
       if (_wbdesc_[_assig_].DESCADDR.reg == (uintptr_t)&_descPtr_) {
-        _wbdesc_[_assig_].DESCADDR.reg == (uintptr_t)_next_->_descPtr_;
+        _wbdesc_[_assig_].DESCADDR.reg = (uintptr_t)_next_->_descPtr_;
       }
     }
     _descPtr_->DESCADDR.reg = 0U;
@@ -559,7 +579,7 @@ namespace sioc::dma { // START OF SIOC::DMA NAMESPACE
     }
   }
 
-  void set_transfer_descriptors(const uint32_t ch_index, TransferDescriptor *tdesc,
+  void set_transfer(const uint32_t ch_index, TransferDescriptor *tdesc,
     const bool &looped) {
     TransferDescriptor *desc_array = tdesc;
     detail::set_transfer(ch_index, &desc_array, 1, looped);

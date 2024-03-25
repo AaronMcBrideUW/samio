@@ -142,40 +142,7 @@ namespace sioc::dma {
 
   uint32_t active_transfer_length(const uint32_t &ch_index, 
     const bool &in_bytes);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     
-
-
-  
-
-
-
-
-
-  
-
-
-
-
-
-
-
 }
 
 
