@@ -10,8 +10,6 @@
 #define SIO_ASSERT_COMPTIME_ENABLED true
 #define SIO_ASSERT_BKPT_NUM 17
 
-namespace sio::core {
-
 
   /// @todo save (to flash?) file/line/msg params.
   constexpr bool sio_assert(const bool &cond) {
@@ -33,5 +31,3 @@ namespace sio::core {
   }
 
   constexpr bool sio_assert() { return sio_assert(true); }
-
-}

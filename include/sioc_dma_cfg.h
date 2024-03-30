@@ -22,10 +22,11 @@ namespace sioc::dma {
 
   //// CONSTANT CONFIG ////
   inline constexpr uint32_t max_channels = 16;
-  inline constexpr bool prilvl_round_robin_mode[DMAC_LVL_NUM] = {true};
-  inline constexpr uint32_t prilvl_service_quality[DMAC_LVL_NUM] = {1, 2, 3, 4}; 
-  inline constexpr uint32_t irq_priority[hwref::_irqcnt_] = {2, 3, 4, 5, 6};
-  inline constexpr bool ch_run_in_standby[max_channels] = {false};
+  inline constexpr bool prilvl_enabled[DMAC_LVL_NUM] = {true, true, true, true};
+  inline constexpr bool prilvl_round_robin_mode[DMAC_LVL_NUM] = {false, false, false, false};
+  inline constexpr uint32_t prilvl_service_quality[DMAC_LVL_NUM] = {1, 1, 2, 3}; 
+  inline constexpr uint32_t irq_priority[hwref::_irqcnt_] = {1, 1, 1, 1, 1};
+  inline constexpr bool ch_run_in_standby[max_channels] = {false, false, false, false};
 
   //// CHANNEL CONFIG DEFAULTS ////
   inline constexpr linked_peripheral_e ch_def_periph = linked_peripheral_e::none;

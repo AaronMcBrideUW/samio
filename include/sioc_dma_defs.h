@@ -30,18 +30,15 @@ namespace sioc::dma {
     inline constexpr std::array<uint32_t, 8> _pri_lvl_map_    = {1, 2, 3, 4};
   }
 
-  /// @brief Denotes the state of a DMA channel.
-  enum class channel_state_e 
-  {
-    disabled, 
-    idle,
-    suspended,
-    active,
+  enum class channel_state_e {
+    null,
+    disabled, // Cannot recieve triggers
+    suspended, // Can recieve triggers but cannot act on them
+    active, // Can recieve triggers and can act on them
   };
 
   /// @brief Denotes the reason that an interrupt was triggered.
-  enum class callback_flag_e
-  {
+  enum class callback_flag_e {
     null,
     transfer_complete,
     transfer_error,
@@ -50,8 +47,7 @@ namespace sioc::dma {
 
   /// @brief Denotes the type of transfer executed by a DMA channel
   ///   each time it recieves a trigger (i.e. is set active).
-  enum class transfer_mode_e : int32_t
-  {
+  enum class transfer_mode_e : int32_t {
     null    = -1,
     packet  = 2,
     single  = 0,
@@ -60,8 +56,7 @@ namespace sioc::dma {
 
   /// @brief Denotes peripheral trigger sources that can be
   ///   linked to a DMA channel.
-  enum class linked_peripheral_e : int32_t
-  {
+  enum class linked_peripheral_e : int32_t {
     null               = -1,
     none               = 0,
     rtc_timestamp      = 1,
@@ -155,7 +150,7 @@ namespace sioc::dma {
   using length_t = decltype(std::declval<DmacDescriptor>().BTCNT.reg);
 
   namespace detail {
-    inline void dummy_callback(const uint32_t&, const callback_flag_e&) {}
+    inline void dummy_callback(const uint32_t&, const callback_flag_e&) { }
     inline struct {}dummy_loc;
   }
 
