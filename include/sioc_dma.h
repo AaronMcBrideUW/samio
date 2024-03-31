@@ -1,178 +1,115 @@
-// This file is part of the SAM-IO C++ library.
-// Copyright (c) 2024 Aaron McBride.
- 
-// This program is free software: you can redistribute it and/or modify  
-// it under the terms of the GNU General Public License as published by  
-// the Free Software Foundation, version 3.
-
-// This program is distributed in the hope that it will be useful, but 
-// WITHOUT ANY WARRANTY; without even the implied warranty of 
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU 
-// General Public License for more details.
-
-// You should have received a copy of the GNU General Public License 
-// along with this program. If not, see <http://www.gnu.org/licenses/>.
- 
 
 #pragma once
 #include <sioc_dma_defs.h>
-#include <sioc_dma_cfg.h>
-#include <inttypes.h>
+#include <sioc_dma_ref.h>
 #include <sam.h>
-#include <String.h>
-#include <math.h>
-#include <utility>
-#include <bit>
-#include <type_traits>
 #include <array>
 #include <iterator>
 #include <algorithm>
-#include <Arduino.h>
-#include <sio_temp.h>
+#include <utility>
 
 namespace sioc::dma {
 
-  //// FORWARD DECLS ////
-  struct SysConfig;
-  struct Channelconfig;
+  struct Channel;
   struct TransferDescriptor;
 
-  //// @e TO_REMOVE!!!!
-  extern TransferDescriptor *_btd_[DMAC_CH_NUM];
-  extern volatile SECTION_DMAC_DESCRIPTOR __ALIGNED(16) DmacDescriptor _wbdesc_[DMAC_CH_NUM];
-  extern SECTION_DMAC_DESCRIPTOR __ALIGNED(16) DmacDescriptor _bdesc_[DMAC_CH_NUM];
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-//// SECTION: SYSTEM FUNCTIONS 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-    
-  uint32_t free_channel_count();
+  namespace detail
+  {
+    uint32_t _chmsk_;
+    TransferDescriptor *_btd_[ref::ch_num]{nullptr};
+    SECTION_DMAC_DESCRIPTOR __ALIGNED(16) DmacDescriptor _bdesc_[ref::ch_num]{};
+    SECTION_DMAC_DESCRIPTOR __ALIGNED(16) DmacDescriptor _wbdesc_[ref::ch_num]{};
 
-  int32_t active_channel_index();
+    inline struct {}dummy_loc;
+  }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-//// SECTION: CHANNEL FUNCTIONS 
-///////////////////////////////////////////////////////////////////////////////////////////////////
+  
+  typedef struct Channel 
+  {
 
-  struct Channel {
+    const int id;
 
-    typedef struct ChannelConfig {
-      linked_peripheral_e periph = linked_peripheral_e::null;
-      transfer_mode_e mode       = transfer_mode_e::null;
-      int32_t burst_len          = -1;
-      int32_t pri_lvl            = -1;
-      callback_t callback        = detail::dummy_callback;
-    };  
-
-    const uint32_t &index = _index_;
-
-    Channel();
-    Channel(const int32_t &index);
-
-    Channel(const Channel &other);
-    Channel(Channel &&other);
-
-    Channel &operator = (const Channel &other);
-    Channel &operator = (Channel &&other); 
-
-    bool set_config(const ChannelConfig &cfg);
-    bool set_config(const Channel &other);
-
-    ChannelConfig config();
-
-    bool reset(const bool &clear_transfer);
-
-    bool set_state(const channel_state_e &state);
-    channel_state_e state() const;
-
-    bool trigger();
-    bool trigger_pending() const;
-    bool transfer_busy() const;
-
-    template<uint32_t N>
-    bool set_transfer(TransferDescriptor *(&desc_array)[N], 
-      const bool &looped = false) {
-      return set_transfer_impl(desc_array, N, looped);
-    }
-
-    bool set_transfer(TransferDescriptor *tdesc, const bool &looped = false);
-    bool set_transfer(std::initializer_list<TransferDescriptor*> desclist,  
-      const bool &looped);
-
-    bool set_active_transfer(const uint32_t &td_index);
-    bool set_active_transfer(TransferDescriptor *td, const int32_t &link_index);
-
-    TransferDescriptor *active_transfer() const;
-
-    bool set_active_transfer_length(const uint32_t &len, const bool &in_bytes);
-
-    int32_t active_transfer_length(const bool &in_bytes);
-
-    ~Channel();
-
-    //// INTERNAL ////
-    protected:
-      int32_t _index_ = -1;
-      DmacChannel *ch = &DMAC->Channel[_index_];
-
-      bool set_transfer_impl(TransferDescriptor** = nullptr, const uint32_t& = 0, 
-        const bool& = false);
-  };
-
-
-///////////////////////////////////////////////////////////////////////////////////////////////////
-//// SECTION: BLOCK DESCRIPTOR OBJ 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-
-  typedef struct TransferDescriptor {
-    
-    typedef struct Config {
-      void *src        = &detail::dummy_loc;
-      void *dst        = &detail::dummy_loc;
-      int src_inc      = -1;
-      int dst_inc      = -1;
-      int beat_size    = -1;
-      int susp_ch      = -1;
+    typedef struct Config
+    {
+      int32_t burstlen   = -1;
+      trigsrc_t trigsrc  = trigsrc_t::null;
+      trigact_t trigact  = trigact_t::null;
+      int32_t prilvl     = -1;
+      int32_t threshold  = -1;
+      int32_t runstdby   = -1; // Boolean cond
+      int32_t susp_cb    = -1; // Boolean cond
     };
 
-    TransferDescriptor();
-    TransferDescriptor(const TransferDescriptor &other);
-    TransferDescriptor(TransferDescriptor &&other);
+    template<Config cfg>
+    void set_config() {
+      using namespace ref;
 
-    TransferDescriptor &operator = (const TransferDescriptor &other);       
-    TransferDescriptor &operator = (TransferDescriptor &&other);
+      // Compute masks for config in ctrl register
+      auto [ctrl_clear_msk, ctrl_set_msk] = [&]() consteval {
+        using ctrl_t = decltype(std::declval<DMAC_CHCTRLA_Type>().reg);
+        ctrl_t clr_msk = 0, set_msk = 0;
 
-    bool set_config(const Config &cfg);
+        // For numeric settings -> use maps to find correspondign reg value
+        if (cfg.burstlen != -1) {
+          constexpr uint32_t bl_reg = std::distance(burstlen_map.begin(),
+              std::find(burstlen_map.begin(), burstlen_map.end(), cfg.burstlen));
+          static_assert(bl_reg < burstlen_map.size(), "SIO ERROR: DMA channel config");
 
-    Config config() const;
+          clr_msk |= (DMAC_CHCTRLA_BURSTLEN_Msk);
+          set_msk |= (bl_reg << DMAC_CHCTRLA_BURSTLEN_Pos);
+        }
+        if (cfg.threshold != -1) {
+          constexpr uint32_t th_reg = std::distance(threshold_map.begin(),
+              std::find(threshold_map.begin(), threshold_map.end(), cfg.threshold));
+          static_assert(th_reg < threshold_map.size(), "SIO ERROR: DMA channel config");
 
-    void reset();
-    
-    bool set_length(const uint32_t &len, const bool &in_bytes);
-    
-    uint32_t length(const bool &in_bytes) const;
+          clr_msk |= (DMAC_CHCTRLA_THRESHOLD_Msk);
+          set_msk |= (th_reg << DMAC_CHCTRLA_THRESHOLD_Pos);
+        }
 
-    bool valid() const;
-  
-    void unlink();
+        // Cast enum/"bool" types, underlying val corresponds to reg value
+        if (cfg.trigsrc != trigsrc_t::null) {
+          clr_msk |= (DMAC_CHCTRLA_TRIGSRC_Msk);
+          set_msk |= (static_cast<uint32_t>(cfg.trigsrc) << DMAC_CHCTRLA_TRIGSRC_Pos);
+        }
+        if (cfg.trigact != trigact_t::null) {
+          clr_msk |= (DMAC_CHCTRLA_TRIGACT_Msk);
+          set_msk |= (static_cast<uint32_t>(cfg.trigact) << DMAC_CHCTRLA_TRIGACT_Pos);
+        }
+        if (cfg.runstdby != -1) {
+          clr_msk |= (DMAC_CHCTRLA_RUNSTDBY);
+          set_msk |= (static_cast<bool>(cfg.runstdby) << DMAC_CHCTRLA_RUNSTDBY_Pos);
+        }
+        return std::make_pair(clr_msk, set_msk);
+      }();
+      // Use masks to mask/clear & set specified cfg in ctrl reg
+      DMAC->Channel[id].CHCTRLA.reg &= ~ctrl_clear_msk;
+      DMAC->Channel[id].CHCTRLA.reg |= ctrl_set_msk;
 
-    ~TransferDescriptor();
+      // Compute masks for config in prictrl register
+      auto [prictrl_clr_msk, prictrl_set_msk] = [&]() consteval {
+        using prictrl_t decltype(std::declval<DMAC_PRICTRL0_Type>().reg);
+        prictrl_t clr_msk = 0, set_msk = 0;
 
-    //// INTERNAL ////
-    DmacDescriptor _desc_{}; 
-    DmacDescriptor *_descPtr_ = &_desc_;
-    TransferDescriptor *_next_;
-    int _assig_ = -1;
+        if (cfg.prilvl != -1) {
+          constexpr uint32_t plvl_reg = std::distance(prilvl_map.begin(),
+              std::find(prilvl_map.begin(), prilvl_map.end(), cfg.prilvl));
+          static_assert(plvl_reg < prilvl_map.size(), "SIO ERROR: DMA channel config");
+
+          clr_msk |= (DMAC_CHPRILVL_PRILVL_Msk);
+          set_msk |= (plvl_reg << DMAC_CHPRILVL_PRILVL_Pos);
+        }
+        return std::make_pair(clr_msk, set_msk);
+      }();
+      // Use masks to mask/clear & set specified config in prictrl reg
+      DMAC->Channel[id].CHPRILVL.reg &= ~prictrl_clr_msk;
+      DMAC->Channel[id].CHPRILVL.reg |= prictrl_set_msk;
+    }
+
   };
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-//// SECTION: DESCRIPTOR FUNCTIONS 
-///////////////////////////////////////////////////////////////////////////////////////////////////
 
 
 }
-
-
-
-
 

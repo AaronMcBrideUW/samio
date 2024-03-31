@@ -20,43 +20,34 @@
 
 namespace sioc::dma {
   
-  namespace hwref {
-    inline constexpr uint8_t _irqcnt_ = 5;
-    inline constexpr uint32_t max_td_length = 1028;
-
-    inline constexpr std::array<uint32_t, 16> _burst_len_map_ = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
-    inline constexpr std::array<uint32_t, 3> _beat_size_map_  = {1, 2, 4};
-    inline constexpr std::array<uint32_t, 8> _step_size_map_  = {1, 2, 4, 8, 16, 32, 64, 128};
-    inline constexpr std::array<uint32_t, 8> _pri_lvl_map_    = {1, 2, 3, 4};
-  }
-
-  enum class channel_state_e {
-    null,
-    disabled, // Cannot recieve triggers
-    suspended, // Can recieve triggers but cannot act on them
-    active, // Can recieve triggers and can act on them
-  };
-
   /// @brief Denotes the reason that an interrupt was triggered.
   enum class callback_flag_e {
     null,
-    transfer_complete,
-    transfer_error,
-    descriptor_error,
+    tcmpl,
+    terr,
+    ferr,
   };
 
   /// @brief Denotes the type of transfer executed by a DMA channel
   ///   each time it recieves a trigger (i.e. is set active).
-  enum class transfer_mode_e : int32_t {
+  enum class blockact_t : int32_t {
     null    = -1,
-    packet  = 2,
-    single  = 0,
-    all     = 3,
+    noact   = 0,
+    noint   = 1,
+    suspend = 2,
+    both    = 3,
+  };
+
+  enum class trigact_t : int32_t {
+    null  = -1,
+    block = 0,
+    burst = 2,
+    transaction = 3,
   };
 
   /// @brief Denotes peripheral trigger sources that can be
   ///   linked to a DMA channel.
-  enum class linked_peripheral_e : int32_t {
+  enum class trigsrc_t : int32_t {
     null               = -1,
     none               = 0,
     rtc_timestamp      = 1,
@@ -149,10 +140,5 @@ namespace sioc::dma {
   using callback_t = void (*)(const uint32_t&, const callback_flag_e&);
   using length_t = decltype(std::declval<DmacDescriptor>().BTCNT.reg);
 
-  namespace detail {
-    inline void dummy_callback(const uint32_t&, const callback_flag_e&) { }
-    inline struct {}dummy_loc;
-  }
 
 } /// End of sioc::dma namespace
-

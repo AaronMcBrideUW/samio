@@ -1,3 +1,4 @@
+/*
 // This file is part of the SAM-IO C++ library.
 // Copyright (c) 2024 Aaron McBride.
  
@@ -16,10 +17,9 @@
 
 #include <sioc_dma.h>
 
-namespace sioc::dma {
+using namespace sioc::dma::hwref;
 
-  //// USING STATEMENTS ////
-  using namespace sioc::dma::hwref;
+namespace sioc::dma {
 
   //// MISC REF VARIABLES ////
   inline constexpr size_t _dsize_ = sizeof(DmacDescriptor);
@@ -31,127 +31,92 @@ namespace sioc::dma {
   volatile SECTION_DMAC_DESCRIPTOR __ALIGNED(16) DmacDescriptor _wbdesc_[DMAC_CH_NUM]{};
   SECTION_DMAC_DESCRIPTOR __ALIGNED(16) DmacDescriptor _bdesc_[DMAC_CH_NUM]{};
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-//// SECTION: UTILITY FUNCTIONS 
-///////////////////////////////////////////////////////////////////////////////////////////////////
+  namespace {
 
-  [[always_inline]]
-  bool writeback_valid(const uint32_t &ch_index) {
-    return (_wbdesc_[ch_index].DESCADDR.reg != DMAC_SRCADDR_RESETVALUE 
-      || _wbdesc_[ch_index].BTCNT.reg) && _wbdesc_[ch_index].SRCADDR.reg
-        != DMAC_SRCADDR_RESETVALUE;
-  }
-
-  [[always_inline]]
-  void assign_base_td(const uint32_t &ch_index, TransferDescriptor *td) {
-    memcpy(&_bdesc_[ch_index], &td->_desc_, _dsize_);
-    td->_descPtr_ = &_bdesc_[ch_index];
-    _btd_[ch_index] = td;
-  }
-
-  [[always_inline]]
-  TransferDescriptor *remove_base_td(const uint32_t &ch_index, const bool &clear_btd) {
-    memcpy(&_btd_[ch_index]->_desc_, &_bdesc_[ch_index], _dsize_);
-    _btd_[ch_index]->_descPtr_ = &_btd_[ch_index]->_desc_;
-    return clear_btd ? std::exchange(_btd_[ch_index], nullptr) 
-      : _btd_[ch_index];
-  }
-
-  [[always_inline]]
-  void link_td(TransferDescriptor *const prev, TransferDescriptor *const targ) {
-    prev->_next_ = targ;
-    prev->_descPtr_->DESCADDR.reg = targ ? (uintptr_t)targ->_descPtr_
-      : DMAC_SRCADDR_RESETVALUE;
-  } 
-
-  [[always_inline]]
-  TransferDescriptor *unlink_td(TransferDescriptor *td) {
-    td->_assig_ = -1;
-    td->_descPtr_->DESCADDR.reg = 0U;
-    return std::exchange(td->_next_, nullptr);
-  }
-
-  [[always_inline]]
-  void update_valid(DmacDescriptor *desc_ptr) {
-    if (!desc_ptr) [[unlikely]] return;
-    desc_ptr->BTCTRL.bit.VALID = desc_ptr->SRCADDR.reg 
-      && desc_ptr->DSTADDR.reg && desc_ptr->BTCNT.reg;
-  }
-
-  
-  void relink_writeback(const uint32_t &ch_index, TransferDescriptor *new_link) {
-    using enum channel_state_e;
-    _wbdesc_[ch_index].DESCADDR.reg = new_link ? 
-      (uintptr_t)new_link->_descPtr_ : DMAC_SRCADDR_RESETVALUE;
-
-    if (!writeback_valid(ch_index) && DMAC->Channel[ch_index]
-      .CHINTFLAG.bit.SUSP && DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE) {
-      DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE = 0U;
-      while(DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE);
-      DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE = 1U;
+    [[always_inline]]
+    bool writeback_valid(const uint32_t &ch_index) {
+      volatile DmacDescriptor &wb = _wbdesc_[ch_index];
+      return !wb.SRCADDR.reg || wb.DESCADDR.reg || wb.BTCNT.reg;
     }
-  }
 
-  uintptr_t addr_mod(DmacDescriptor *desc, const bool &is_src) {
-    if (!desc || !(is_src ? desc->BTCTRL.bit.SRCINC 
-      : desc->BTCTRL.bit.DSTINC)) return 0;
+    [[always_inline]]
+    void assign_base_td(const uint32_t &ch_index, TransferDescriptor *td) {
+      memcpy(&_bdesc_[ch_index], &td->_desc_, _dsize_);
+      td->_descPtr_ = &_bdesc_[ch_index];
+      _btd_[ch_index] = td;
+    }
 
-    bool sel = (desc->BTCTRL.bit.STEPSEL == is_src 
-      ? DMAC_BTCTRL_STEPSEL_SRC_Val : DMAC_BTCTRL_STEPSEL_DST_Val);
-    return desc->BTCNT.reg * (_beat_size_map_[desc->BTCTRL.bit.BEATSIZE])
-      * (sel ? (1 << desc->BTCTRL.bit.STEPSIZE) : 1);    
-  }
+    [[always_inline]]
+    TransferDescriptor *remove_base_td(const uint32_t &ch_index, const bool &clear_btd) {
+      memcpy(&_btd_[ch_index]->_desc_, &_bdesc_[ch_index], _dsize_);
+      _btd_[ch_index]->_descPtr_ = &_btd_[ch_index]->_desc_;
+      return clear_btd ? std::exchange(_btd_[ch_index], nullptr) : _btd_[ch_index];
+    }
 
-  typedef struct SuspendSection {
-    SuspendSection(const int32_t &ch_index) : _index_(ch_index) {
-      if (ch_index < 0 || ch_index >= DMAC_CH_NUM) return;
-      if (!DMAC->Channel[_index_].CHINTFLAG.bit.SUSP 
-        && DMAC->Channel[_index_].CHCTRLA.bit.ENABLE) {
-        _flag_ = true;
-        DMAC->Channel[_index_].CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_SUSPEND_Val;
-        while(!DMAC->Channel[ch_index].CHINTFLAG.bit.SUSP);
+    [[always_inline]]
+    void link_td(TransferDescriptor *const prev, TransferDescriptor *const targ) {
+      prev->_descPtr_->DESCADDR.reg = targ ? (uintptr_t)targ->_descPtr_ : 0U;
+      prev->_next_ = targ;
+    } 
+
+    [[always_inline]]
+    TransferDescriptor *unlink_td(TransferDescriptor *td) {
+      td->_assig_ = -1;
+      td->_descPtr_->DESCADDR.reg = 0U;
+      return std::exchange(td->_next_, nullptr);
+    }
+
+    [[always_inline]]
+    void update_valid(DmacDescriptor *desc_ptr) {
+      if (!desc_ptr) [[unlikely]] return;
+      desc_ptr->BTCTRL.bit.VALID = desc_ptr->SRCADDR.reg && 
+        desc_ptr->DSTADDR.reg && desc_ptr->BTCNT.reg;
+    }
+
+    void relink_writeback(const uint32_t &ch_index, TransferDescriptor *new_link) {
+      using enum channel_state_e;
+      _wbdesc_[ch_index].DESCADDR.reg = new_link ? 
+          (uintptr_t)new_link->_descPtr_ : DMAC_SRCADDR_RESETVALUE;
+
+      if (!writeback_valid(ch_index) && DMAC->Channel[ch_index]
+        .CHINTFLAG.bit.SUSP && DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE) {
+        DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE = 0U;
+        while(DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE);
+        DMAC->Channel[ch_index].CHCTRLA.bit.ENABLE = 1U;
       }
     }
-    ~SuspendSection() {
-      if (_flag_ && DMAC->Channel[_index_].CHINTFLAG.bit.SUSP) {
-        DMAC->Channel[_index_].CHINTFLAG.bit.SUSP = 1U;
-        DMAC->Channel[_index_].CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_RESUME_Val;
-      } 
-    }
-    bool _flag_ = false;
-    const int32_t _index_ = -1;
-  };
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-//// SECTION: INTERRUPT HANDLER
-///////////////////////////////////////////////////////////////////////////////////////////////////
+    uintptr_t addr_mod(DmacDescriptor *desc, const bool &is_src) {
+      if (!desc || !(is_src ? desc->BTCTRL.bit.SRCINC 
+        : desc->BTCTRL.bit.DSTINC)) return 0;
 
-  void dma_irq_handler() { ///////// NEEDS CHECK
-    using namespace sioc::dma;
-    using enum callback_flag_e;
+      bool sel = (desc->BTCTRL.bit.STEPSEL == is_src 
+        ? DMAC_BTCTRL_STEPSEL_SRC_Val : DMAC_BTCTRL_STEPSEL_DST_Val);
+      return desc->BTCNT.reg * (_beat_size_map_[desc->BTCTRL.bit.BEATSIZE])
+        * (sel ? (1 << desc->BTCTRL.bit.STEPSIZE) : 1);    
+    }
 
-    uint32_t index = DMAC->INTPEND.bit.ID;
-    callback_flag_e flag = null;
-    
-    if (DMAC->INTPEND.bit.TCMPL) {
-      DMAC->Channel[index].CHINTFLAG.bit.TCMPL = 1U;
-      flag = transfer_complete;
-    }
-    if (DMAC->INTPEND.bit.TERR) {
-      DMAC->Channel[index].CHINTFLAG.bit.TERR = 1U;
-      flag = DMAC->Channel[index].CHSTATUS.bit.FERR ? 
-        descriptor_error : transfer_error;
-    }
-    if (flag != null && _cbarr_[index]) {
-      _cbarr_[index](index, flag);
-    }
+    typedef struct SuspendSection {
+      SuspendSection(const int32_t &ch_index) : _index_(ch_index) {
+        if (ch_index < 0 || ch_index >= DMAC_CH_NUM) return;
+        if (!DMAC->Channel[_index_].CHINTFLAG.bit.SUSP 
+          && DMAC->Channel[_index_].CHCTRLA.bit.ENABLE) {
+          _flag_ = true;
+          DMAC->Channel[_index_].CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_SUSPEND_Val;
+          while(!DMAC->Channel[ch_index].CHINTFLAG.bit.SUSP);
+        }
+      }
+      ~SuspendSection() {
+        if (_flag_ && DMAC->Channel[_index_].CHINTFLAG.bit.SUSP) {
+          DMAC->Channel[_index_].CHINTFLAG.bit.SUSP = 1U;
+          DMAC->Channel[_index_].CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_RESUME_Val;
+        } 
+      }
+      bool _flag_ = false;
+      const int32_t _index_ = -1;
+    };
+
   }
-
-  void DMAC_0_Handler() { dma_irq_handler(); }  
-  void DMAC_1_Handler() { dma_irq_handler(); }
-  void DMAC_2_Handler() { dma_irq_handler(); }
-  void DMAC_3_Handler() { dma_irq_handler(); }
-  void DMAC_4_Handler() { dma_irq_handler(); }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //// SECTION: MISC FUNCTIONS
@@ -172,7 +137,6 @@ namespace sioc::dma {
 
   #define require_index(_ret_) if (_index_ < 0 || _index_ >= max_channels) return _ret_
 
-  /// @b COMPLETE
   Channel::Channel() : Channel([] -> int32_t {
     for (uint32_t i = 0; i < DMAC_CH_NUM; i++) {
       if ((ch_msk & (1U << i)) == 0U) return i;
@@ -180,9 +144,7 @@ namespace sioc::dma {
     return -1;
   }()){};
 
-  /// @b COMPLETE
   Channel::Channel(const int32_t &index) : _index_(index) { 
-    require_index();
     if (ch_msk == 0U) [[unlikely]] {
       DMAC->CTRL.bit.DMAENABLE = 0U;
       while(DMAC->CTRL.bit.DMAENABLE);
@@ -228,95 +190,67 @@ namespace sioc::dma {
     }
   }
 
-  /// @b COMPLETE
   Channel::Channel(const Channel &other) {
     this->operator=(other);
   }
+
   Channel &Channel::operator = (const Channel &other) {
     if (this != &other) _index_ = other._index_;
     return *this;
   }
 
-  /// @b COMPLETE
   Channel::Channel(Channel &&other) {
     this->operator=(std::move(other));
   }
+
   Channel &Channel::operator=(Channel &&other) {
     if (this != &other) std::swap(_index_, other._index_);
     return *this;
   }
 
   bool Channel::set_state(const channel_state_e &state) {
-    require_index(false);
     using enum channel_state_e;
-    if (this->state() == state) return true;
 
-    switch(state) {
-      case disabled: {
-        ch->CHCTRLA.bit.ENABLE = 0U;
-        while(ch->CHCTRLA.bit.ENABLE);
-        if (ch->CHINTFLAG.bit.SUSP) {
-          ch->CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_RESUME_Val;
-        }
-        ch->CHINTFLAG.reg &= ~DMAC_CHINTFLAG_MASK;
-        break;
-      }
-      case suspended: {
+    if (state != this->state()) {
+      if (state == suspended) {
         ch->CHCTRLA.bit.ENABLE = 1U;
         ch->CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_SUSPEND_Val;
         while(!ch->CHINTFLAG.bit.SUSP);
-        break;
-      }
-      case active: {
+      } else {
+        ch->CHCTRLA.bit.ENABLE = (uint32_t)(state == enabled);
         if (ch->CHINTFLAG.bit.SUSP) {
           ch->CHINTFLAG.bit.SUSP = 1U;
-          if (ch->CHCTRLA.bit.ENABLE && !writeback_valid(_index_)) {
-            ch->CHCTRLA.bit.ENABLE = 0U;
-            while(ch->CHCTRLA.bit.ENABLE);
-            ch->CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_RESUME_Val;
-            ch->CHCTRLA.bit.ENABLE = 1U;
-          } else {
-            ch->CHCTRLA.bit.ENABLE = 1U;
-            ch->CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_RESUME_Val;
-          }
-        } else {
-          ch->CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_NOACT_Val;
-          ch->CHCTRLA.bit.ENABLE = 1U;
+          ch->CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_RESUME_Val;
         }
-        break;
-      } 
-      default: return false;
+      }
     }
-    return this->state() == state;
+    return true;
   }
+
   channel_state_e Channel::state() const {
     using enum channel_state_e;
-    require_index(null);
     if (!ch->CHCTRLA.bit.ENABLE) {
       return disabled;
     } else if (ch->CHINTFLAG.bit.SUSP) {
       return suspended;
     }
-    return active;
+    return enabled;
   }
 
-  bool Channel::trigger() {
-    require_index(false);
-    using enum channel_state_e;
-    if (state() == disabled || ch->CHSTATUS.bit.PEND) return false; 
+  void Channel::trigger() {
     DMAC->SWTRIGCTRL.reg |= (1 << (_index_ + DMAC_SWTRIGCTRL_SWTRIG0_Pos));
-    return true;
   }
+
   bool Channel::trigger_pending() const {
     return ch->CHSTATUS.bit.PEND;
   }
+
   bool Channel::transfer_busy() const {
     return ch->CHSTATUS.bit.BUSY && !ch->CHINTFLAG.bit.SUSP;
   }
 
   /// @b COMPLETE
   bool Channel::set_config(const ChannelConfig &cfg) {
-    require_index(false);
     uint32_t burst_len_r = 0U, pri_lvl_r = 0U;
     if (cfg.burst_len >= 0) {
       burst_len_r = std::distance(_burst_len_map_.begin(), std::find
@@ -364,7 +298,6 @@ namespace sioc::dma {
     return true;
   }
 
-  /// @b COMPLETE
   Channel::ChannelConfig Channel::config() {
     require_index(ChannelConfig{});
     return ChannelConfig{
@@ -376,7 +309,6 @@ namespace sioc::dma {
     };
   }
 
-  /// @b COMPLETE
   bool Channel::reset(const bool &clear_transfer) { 
     require_index(false);
     constexpr uint32_t burstlen_r = std::distance(_burst_len_map_.begin(), 
@@ -398,7 +330,10 @@ namespace sioc::dma {
     ch->CHCTRLA.bit.SWRST = 1U;
     while(ch->CHCTRLA.bit.SWRST);
 
+    ch->CHINTENSET.bit.TCMPL = 1U;
+    ch->CHINTENSET.bit.TERR = 1U;
     ch->CHCTRLA.bit.RUNSTDBY = ch_run_in_standby[_index_];
+
     ch->CHCTRLA.bit.TRIGSRC  = (uint32_t)ch_def_periph;
     ch->CHCTRLA.bit.TRIGACT  = (uint32_t)ch_def_mode;
     ch->CHCTRLA.bit.BURSTLEN = burstlen_r;
@@ -407,7 +342,6 @@ namespace sioc::dma {
     return true;
   }
 
-  /// @b COMPLETE
   bool Channel::set_transfer(TransferDescriptor *tdesc, const bool &looped) {
     TransferDescriptor *desc_array = tdesc;
     return set_transfer_impl(&desc_array, 1, looped);
@@ -421,7 +355,6 @@ namespace sioc::dma {
     return set_transfer_impl(desc_array, desclist.size(), looped);
   }
 
-  /// @b COMPLETE
   bool Channel::set_active_transfer(const uint32_t &td_index) {
     require_index(false);
     if (!_btd_[_index_]) return false;
@@ -436,7 +369,6 @@ namespace sioc::dma {
     return true;
   }
 
-  /// @b COMPLETE
   bool Channel::set_active_transfer(TransferDescriptor *td, 
     const int32_t &link_index) {
     require_index(false);
@@ -458,36 +390,34 @@ namespace sioc::dma {
     return true;
   }
 
-  /// @b COMPLETE
   TransferDescriptor *Channel::active_transfer() const {
     require_index(nullptr);
     auto crit = SuspendSection(_index_);
     TransferDescriptor *curr = _btd_[_index_]; 
-    if (curr && _wbdesc_[_index_].SRCADDR.reg != DMAC_SRCADDR_RESETVALUE) {
-      do {
-        if (curr->_descPtr_->DESCADDR.reg != _wbdesc_[_index_].DESCADDR.reg) {
-          return curr;
-        } 
+
+    if (curr && _wbdesc_[_index_].BTCNT.reg) {
+      while(curr->_descPtr_->DESCADDR.reg != (uintptr_t)&_wbdesc_[_index_]) {
+        if (!curr->_next_ || curr->_next_ == _btd_[_index_]) 
+          return curr; 
+
         curr = curr->_next_;
-      } while(curr && curr != _btd_[_index_]);
+      }
     }
     return nullptr;
   }
 
-  /// @b COMPLETE
   bool Channel::set_active_transfer_length(const uint32_t &len, 
     const bool &in_bytes) {
     require_index(false);
     auto crit = SuspendSection(_index_);
 
-    TransferDescriptor *a_desc = active_transfer();
     if (!_btd_[_index_] || _wbdesc_[_index_].SRCADDR.reg 
-      == DMAC_SRCADDR_RESETVALUE || !a_desc) return false;
+      == DMAC_SRCADDR_RESETVALUE) return false;
 
-    uintptr_t s_addr = a_desc->_descPtr_->SRCADDR.reg 
-      - addr_mod(a_desc->_descPtr_, true);
-    uintptr_t d_addr = a_desc->_descPtr_->DSTADDR.reg
-      - addr_mod(a_desc->_descPtr_, false);
+    uintptr_t s_addr = _wbdesc_[_index_].SRCADDR.reg 
+      - addr_mod((DmacDescriptor*)&_wbdesc_[_index_], true);
+    uintptr_t d_addr = _wbdesc_[_index_].DSTADDR.reg
+      - addr_mod((DmacDescriptor*)&_wbdesc_[_index_], false);
 
     if (in_bytes && len) {
       _wbdesc_[_index_].BTCNT.reg = len / _beat_size_map_
@@ -502,16 +432,16 @@ namespace sioc::dma {
     return true;
   }
 
-  /// @b COMPLETE
   int32_t Channel::active_transfer_length(const bool &in_bytes) {
     require_index(-1);
     auto crit = SuspendSection(_index_);
-    if (!_btd_[_index_]) return -1;
+    if (!_btd_[_index_] || _wbdesc_[_index_].SRCADDR.reg
+      == DMAC_SRCADDR_RESETVALUE) return -1;
+
     return _wbdesc_[_index_].BTCNT.reg * (in_bytes ? _beat_size_map_
       [_wbdesc_[_index_].BTCTRL.bit.BEATSIZE] : 1); 
   }
 
-  /// @b COMPLETE
   Channel::~Channel() {
     require_index();
     sio_assert((ch_msk & (1U << _index_)) == 0U);
@@ -539,7 +469,6 @@ namespace sioc::dma {
     }
   }
 
-  /// @b TESTED* -> @b WRITEBACK_FIX_V1
   bool Channel::set_transfer_impl(TransferDescriptor **desc_list, 
     const uint32_t &length, const bool &looped) {
     require_index(false);
@@ -602,24 +531,19 @@ namespace sioc::dma {
   TransferDescriptor &TransferDescriptor::operator = (TransferDescriptor &&other) {
     if (this == &other) return *this;
     if (_assig_ != -1) unlink();
-    Serial.println("here");
 
     if (other._assig_ != -1 && _btd_[other._assig_] == &other) {
-      Serial.println("here1");
       _descPtr_ = std::exchange(other._descPtr_, &other._desc_);
       _btd_[other._assig_] = this;
     } else {
-      Serial.println("here2");
       memcpy(&_desc_, &other._desc_, _dsize_);
 
       if (other._assig_ != -1) {
-        Serial.println("here3");
         TransferDescriptor *prev = _btd_[other._assig_];
         while(prev->_next_ != &other) prev = prev->_next_;
 
         auto crit = SuspendSection(other._assig_); 
         if (_wbdesc_[other._assig_].DESCADDR.reg == (uintptr_t)&other._desc_) {
-          Serial.println("here");
           relink_writeback(other._assig_, this);
         }
         link_td(prev, this);
@@ -632,7 +556,7 @@ namespace sioc::dma {
   }
 
   bool TransferDescriptor::set_config(const Config &cfg) {
-    if (cfg.src_inc > 1 && cfg.dst_inc > 1) return false;
+    if ((cfg.src_inc > 1 && cfg.dst_inc > 1) || _assig_ != -1)  return false;
     
     uint32_t beatsize_r = DMAC_BTCTRL_BEATSIZE_BYTE_Val;
     if (cfg.beat_size >= 0) {
@@ -786,3 +710,35 @@ namespace sioc::dma {
 
 
 } // END OF SIOC::DMA NAMESPACE
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+//// SECTION: INTERRUPT HANDLER
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+  // Must be outside ns
+  void DMAC_0_Handler() { 
+    using namespace sioc::dma;
+    using enum callback_flag_e;
+    uint32_t idx = DMAC->INTPEND.bit.ID; // channel index
+
+    if (_cbarr_[idx]) {
+      // Transfer error cb -> check is fetch error status active?
+      if (DMAC->INTPEND.bit.TERR) { 
+        _cbarr_[idx](idx, DMAC->INTPEND.bit.FERR ? desc_err : tr_err);
+      }
+      // Transfer complete cb
+      if (DMAC->INTPEND.bit.TCMPL) { 
+        _cbarr_[idx](idx, tr_done);
+      }
+    }
+    // Clear all interrupt flags (wont work otherwise!)
+    DMAC->INTPEND.bit.TCMPL = 1U;
+    DMAC->INTPEND.bit.TERR = 1U;
+  } 
+  // Re-route all other handlers to 0
+  void DMAC_1_Handler() { DMAC_0_Handler(); }
+  void DMAC_2_Handler() { DMAC_0_Handler(); }
+  void DMAC_3_Handler() { DMAC_0_Handler(); }
+  void DMAC_4_Handler() { DMAC_0_Handler(); }
+
+*/
