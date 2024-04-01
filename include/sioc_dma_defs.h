@@ -20,6 +20,12 @@
 
 namespace sioc::dma {
   
+  enum class channel_state_t {
+    disabled,
+    suspended,
+    enabled,
+  };
+
   /// @brief Denotes the reason that an interrupt was triggered.
   enum class callback_flag_e {
     null,
