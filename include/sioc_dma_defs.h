@@ -27,8 +27,9 @@ namespace sioc::dma {
   };
 
   /// @brief Denotes the reason that an interrupt was triggered.
-  enum class callback_flag_e {
+  enum class callback_flag_t {
     null,
+    susp,
     tcmpl,
     terr,
     ferr,
@@ -143,7 +144,7 @@ namespace sioc::dma {
   };
 
 
-  using callback_t = void (*)(const uint32_t&, const callback_flag_e&);
+  using callback_t = void (*)(const uint32_t&, const callback_flag_t&);
   using length_t = decltype(std::declval<DmacDescriptor>().BTCNT.reg);
 
 
