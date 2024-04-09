@@ -21,18 +21,19 @@
 namespace sioc::dma {
   
   enum class channel_state_t {
-    disabled,
-    suspended,
-    enabled,
+    null      = 0,
+    disabled  = 1,
+    suspended = 2,
+    enabled  = 3,
   };
 
   /// @brief Denotes the reason that an interrupt was triggered.
   enum class callback_flag_t {
-    null,
-    susp,
-    tcmpl,
-    terr,
-    ferr,
+    null  = 0,
+    susp  = 1,
+    tcmpl = 2,
+    terr  = 3,
+    ferr  = 4,
   };
 
   /// @brief Denotes the type of transfer executed by a DMA channel
@@ -144,7 +145,7 @@ namespace sioc::dma {
   };
 
 
-  using callback_t = void (*)(const uint32_t&, const callback_flag_t&);
+  typedef void (*callback_t)(const uint32_t&, const callback_flag_t&);
   using length_t = decltype(std::declval<DmacDescriptor>().BTCNT.reg);
 
 
