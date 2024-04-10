@@ -11,6 +11,7 @@
 #include <type_traits>
 #include <bit>
 #include <Arduino.h>
+#include <functional>
 
 #define err_ch_cfg_invalid "SIO ERROR: dma channel config invalid."
 #define err_periph_cfg_invalid "SIO ERROR: dma peripheral config invalid."
@@ -19,37 +20,15 @@
 
 namespace sioc::dma {
 
-    struct TransferDescriptor;
+  struct TransferDescriptor;
 
   namespace detail {
-
-    template<int inst>
-      requires requires {
-        inst >= 0;
-        inst < ref::inst_num;
-      }
-    struct InstCommon 
-    { 
-      static inline uint32_t ch_msk{0};                             // Allocated channels
-      static inline DmacDescriptor bdesc[ref::max_ch]{};            // Base transfer descriptor
-      static inline DmacDescriptor wbdesc[ref::max_ch]{};           // Writeback transfer descriptors
-      static inline TransferDescriptor<inst> *btd[ref::max_ch]{nullptr};  // Base transfer descriptor objs
-      static inline volatile bool suspf[ref::max_ch]{false};        // Channel suspend flags
-      static inline callback_t cbarr[ref::max_ch]{nullptr};         // Channel callback func ptrs
-    };
-
-    struct PeriphConfig
-    {
-      static inline constexpr std::array<int32_t, DMAC_LVL_NUM> prilvl_en{1, 1, 1, 1};            // Priority lvl enabled
-      static inline constexpr std::array<int32_t, DMAC_LVL_NUM> prilvl_rr{0, 0, 0, 0};            // Priority lvl round robin arbitration
-      static inline constexpr std::array<int32_t, DMAC_LVL_NUM> prilvl_squal{1, 2, 3, 4};         // Priority lvl service quality
-      static inline constexpr std::array<int32_t, ref::irq_array.size()> irq_prio{1, 2, 3, 4, 5}; // Irq priority lvl
-    };
 
     inline struct {}dummy_loc;
     inline void dummy_cb(const uint32_t &a, const callback_flag_t &b) { }
     inline constexpr size_t _dsize_ = sizeof(DmacDescriptor);
     using dumm_t = decltype(detail::dummy_loc);
+    using remove_fn = void (*)(TransferDescriptor*);
 
     /// @b COMPLETE_V2
     inline void update_valid(DmacDescriptor &desc) {
@@ -107,12 +86,8 @@ namespace sioc::dma {
   } // END OF ANON NAMESPACE 
 
 
-  template<Channel &ch>
-    requires requires {
-      inst >= 0;
-      inst < ref::inst_num;
-    }
-  struct TransferDescriptor : detail::InstCommon<inst>
+
+  struct TransferDescriptor
   {
     
     /// @b COMPLETE_V2
@@ -393,140 +368,222 @@ namespace sioc::dma {
 
     DmacDescriptor *_descPtr_{&_desc_};
     DmacDescriptor _desc_{};
-    int8_t *assig_inst, *assig_id;
     TransferDescriptor *next{nullptr};
-
-    protected:
-
-      
-
   };
 
 
-
+  // TO REMOVE
   constexpr int inst = 0;
   constexpr int id = 0;
 
-  // template<int inst = 0, int id = 0>
-  //   requires requires {
-  //     inst >= 0;
-  //     inst < ref::inst_num;
-  //     id >= 0;
-  //     id < ref::max_ch;
-  //   }
-  struct Channel : detail::InstCommon<inst> 
+  template<unsigned int inst>
+    requires requires {
+      inst < ref::inst_num;
+      inst < DMAC_INST_NUM;      
+    }
+  struct BasePeripheral 
+  {
+
+    /// @a V3_COMPLETE
+    BasePeripheral() = default;
+
+    /// @a V3_COMPLETE
+    template<unsigned int other_inst>
+      requires requires {
+        other_inst < ref::inst_num;
+        other_inst < DMAC_INST_NUM;
+      }
+    BasePeripheral(const BasePeripheral<other_inst> &other) {
+      this->operator = (other);
+    }
+
+    /// @a V3_COMPLETE
+    template<unsigned int other_inst>
+      requires requires {
+        other_inst < ref::inst_num;
+        other_inst < DMAC_INST_NUM;
+      }
+    BasePeripheral<inst> operator = (const BasePeripheral<other_inst> &other) {
+      if (is_init() && other.is_init() && &other != this) [[likely]] {
+
+        // Copy config from registers
+        DMAC[inst].CTRL.reg = DMAC[other_inst].CTRL.reg;
+        DMAC[inst].PRICTRL0.reg = DMAC[other_inst].PRICTRL0.reg;
+
+        // Copy/set irq priority level config
+        constexpr int t_irq_off = ref::irq_array.size() * inst;
+        constexpr int o_irq_off = ref::irq_array.size() * other_inst;
+
+        for (int i = 0; i < ref::irq_array.size(); i++) {
+          auto other_prio = NVIC_GetPriority(static_cast<IRQn_Type>(ref::irq_array[i] + o_irq_off));
+          NVIC_SetPriority(static_cast<IRQn_Type>(ref::irq_array[i] + t_irq_off), other_prio);
+        }
+      }
+      return *this;
+    }
+
+    /// @a V3_COMPLETE
+    struct Config
+    {
+      std::array<int32_t, DMAC_LVL_NUM> prilvl_en{-1, -1, -1, -1};             // Priority lvl enabled
+      std::array<int32_t, DMAC_LVL_NUM> prilvl_rr{-1, -1, -1, -1};             // Priority lvl round robin arbitration
+      std::array<int32_t, DMAC_LVL_NUM> prilvl_squal{-1, -1, -1, -1};          // Priority lvl service quality
+      std::array<int32_t, ref::irq_array.size()> irq_prio{-1, -1, -1, -1, -1}; // Irq priority lvl
+    };
+
+    /// @a V3_COMPLETE
+    template<Config cfg>
+    static void set_config() {
+      if (!is_init()) { return; } // #WARN
+      using namespace ref;
+
+      // Compute reg values for irq priority
+      constexpr auto irq_prio_arr = []() consteval {
+        using prio_t = decltype(NVIC_GetPriority(DMAC_0_IRQn));
+        return ([]<uint32_t... Is>(std::integer_sequence<uint32_t, Is...>) consteval {
+          std::array<prio_t, ref::irq_array.size()> prio_arr{};
+
+          // Get reg value for individual priority lvl
+          constexpr auto irq_prio_i = []<uint32_t i>() consteval {
+            constexpr auto irq_prio_cfg = cfg.irq_prio.at(i);
+            prio_t prio_reg_f{0};
+            
+            if constexpr (irq_prio_cfg != -1) {
+              constexpr uint32_t prio_reg = std::distance(irqpri_map.begin(),
+                  std::find(irqpri_map.begin(), irqpri_map.end(), irq_prio_cfg));
+              static_assert(irq_prio_cfg < irqpri_map.size(), "SIO ERROR: dma config invalid.");
+              prio_reg_f = prio_reg;
+            }
+            return prio_reg_f;
+          }; 
+          // Build up & return array of cfg reg values (fold expr.)
+          return ((prio_arr.at(Is) = irq_prio_i.template operator()<Is>(), prio_arr), ...); 
+        }.operator()<>(std::make_integer_sequence<uint32_t, ref::irq_array.size()>()));
+      }();
+      // Set priority lvl config
+      constexpr uint32_t irq_off = irq_array.size() * inst;
+      for (uint32_t i = 0; i < ref::irq_array.size(); i++) {
+        auto irq = static_cast<IRQn_Type>(irq_off + ref::irq_array[i]);
+        NVIC_SetPriority(irq, irq_prio_arr[i]); 
+      }
+      // Compute masks for and set priority lvl cfg
+      constexpr auto prio_masks = []() consteval {
+        using prictrl_t = decltype(std::declval<DMAC_PRICTRL0_Type>().reg);
+        using ctrl_t = decltype(std::declval<DMAC_CTRL_Type>().reg);
+        return ([]<uint32_t... Is>(std::integer_sequence<uint32_t, Is...>) consteval {
+          std::tuple<prictrl_t, prictrl_t, ctrl_t, ctrl_t> masks{}, temp_masks{};
+
+          // Generate mask for specific priority lvl cfg
+          constexpr auto prictrl_msk_i = []<uint32_t i>() consteval {
+            constexpr auto squal_val = cfg.prilvl_squal.at(i);
+            constexpr auto rr_val = cfg.prilvl_rr.at(i);
+            constexpr auto en_val = cfg.prilvl_en.at(i);
+            prictrl_t set_msk_prio{0}, clr_msk_prio{0};
+            ctrl_t clr_msk_ctrl{0}, set_msk_ctrl{0};
+
+            if constexpr (squal_val != -1) {
+              constexpr auto squal_reg = std::distance(squal_map.begin(), 
+                  std::find(squal_map.begin(), squal_map.end(), squal_val));
+              static_assert(squal_reg < squal_map.size(), "SIO ERROR: dma config invalid");
+              
+              uint32_t off = i * (DMAC_PRICTRL0_QOS1_Pos - DMAC_PRICTRL0_QOS0_Pos);
+              clr_msk_prio |= (DMAC_PRICTRL0_QOS0_Msk << off);
+              set_msk_prio |= (squal_reg << (off + DMAC_PRICTRL0_QOS0_Pos));
+            }
+            if constexpr (rr_val != -1) {
+              static_assert(rr_val == 0 || rr_val == 1, "SIO ERROR: dma config invalid");
+              uint32_t off = i * (DMAC_PRICTRL0_RRLVLEN1_Pos - DMAC_PRICTRL0_RRLVLEN0_Pos);
+              clr_msk_prio |= (1U << (off + DMAC_PRICTRL0_RRLVLEN0_Pos));
+              set_msk_prio |= (static_cast<bool>(rr_val) << (off + DMAC_PRICTRL0_RRLVLEN0_Pos));
+            }
+            if constexpr (en_val != -1) {
+              static_assert(en_val == 0 || en_val == 1, "SIO ERROR: dma config invalid");
+              uint32_t off = i * (DMAC_CTRL_LVLEN1_Pos - DMAC_CTRL_LVLEN0_Pos);
+              clr_msk_ctrl |= (1U << (off + DMAC_CTRL_LVLEN0_Pos));
+              set_msk_ctrl |= (static_cast<bool>(en_val) << (off + DMAC_CTRL_LVLEN0_Pos));
+            }
+            return std::make_tuple(clr_msk_prio, set_msk_prio, clr_msk_ctrl, set_msk_ctrl);
+          };
+          // Iterate over priority lvls & generate masks
+          return ((temp_masks = prictrl_msk_i.template operator()<Is>(),
+              std::get<0>(masks) |= std::get<0>(temp_masks),
+              std::get<1>(masks) |= std::get<1>(temp_masks),
+              std::get<2>(masks) |= std::get<2>(temp_masks),
+              std::get<3>(masks) |= std::get<3>(temp_masks), 
+              masks), ...); 
+        }.operator()<>(std::make_integer_sequence<uint32_t, DMAC_LVL_NUM>()));
+      }();
+      // Structured binding for masks, set config
+      auto [clr_prictrl, set_prictrl, clr_ctrl, set_ctrl] = prio_masks;
+      DMAC[inst].PRICTRL0.reg &= ~clr_prictrl;
+      DMAC[inst].PRICTRL0.reg |= set_prictrl;
+      DMAC[inst].CTRL.reg &= ~clr_ctrl;
+      DMAC[inst].CTRL.reg |= set_ctrl;
+    }
+
+    /// @a V3_COMPLETE
+    static void init() {
+      if (is_init()) { return; }
+      exit();
+      // Enable all irq interrupts
+      constexpr int irq_off = ref::irq_array.size() * inst;
+      for (int i = 0; i < ref::irq_array.size(); i++) {
+        NVIC_EnableIRQ(static_cast<IRQn_Type>(irq_off + ref::irq_array[i]));
+      }
+      // Set base/writeback mem sections & enable dma/clock
+      DMAC[inst].BASEADDR.reg = reinterpret_cast<uintptr_t>(bdesc);
+      DMAC[inst].WRBADDR.reg = reinterpret_cast<uintptr_t>(wbdesc);
+      MCLK->AHBMASK.reg |= (1 << (DMAC_CLK_AHB_ID + inst));
+      DMAC[inst].CTRL.bit.DMAENABLE = 1;
+    }
+
+    /// @a V3_COMPLETE
+    static void exit() {
+      if (!is_init()) { return; }
+      // Disable dma/ahbbus & reset all registers
+      DMAC[inst].CTRL.bit.DMAENABLE = 0;
+      while(DMAC[inst].CTRL.bit.DMAENABLE);
+      DMAC[inst].CTRL.bit.SWRST = 1;
+      while(DMAC[inst].CTRL.bit.SWRST);
+      MCLK->AHBMASK.reg &= ~(1 << (MCLK_AHBMASK_DMAC_Pos + inst));
+
+      // Disable & reset all irq interrupts
+      constexpr int irq_off = ref::irq_array.size() * inst;
+      for (int i = 0; i < ref::irq_array.size(); i++) {
+        auto curr_irq = static_cast<IRQn_Type>(ref::irq_array[i] + irq_off);
+        NVIC_DisableIRQ(curr_irq);
+        NVIC_ClearPendingIRQ(curr_irq);
+        NVIC_SetPriority(curr_irq, ref::def_irq_prio);
+      }
+      // Reset fields
+      memset(const_cast<DmacDescriptor*>(wbdesc), 0U, sizeof(wbdesc));
+      memset(bdesc, 0U, sizeof(bdesc));
+      alloc_msk = 0;
+    }
+
+    /// @a V3_COMPLETE
+    static inline bool is_init() {
+      auto b_addr = reinterpret_cast<uintptr_t>(bdesc); 
+      return DMAC[inst].CTRL.bit.DMAENABLE && DMAC[inst].BASEADDR.reg == b_addr;
+    }
+
+    protected:
+      static inline uint32_t alloc_msk{0};
+      static inline DmacDescriptor bdesc[ref::max_ch]{};            // Base transfer descriptor
+      static inline DmacDescriptor wbdesc[ref::max_ch]{};           // Writeback transfer descriptors
+  };
+
+
+  struct Channel
   {
 
     /// @a V2_COMPLETE
     Channel() {
       if (!ch_msk) [[unlikely]] { 
         using namespace ref;
-        uint32_t irq_off = irq_array.size() * inst;
-
-        // If used since exit -> reset registers
-        if (DMAC[inst].CTRL.bit.DMAENABLE || 
-            DMAC[inst].BASEADDR.reg) [[unlikely]] {
-          DMAC[inst].CTRL.bit.DMAENABLE = 0;        // Disable DMA
-          while(DMAC[inst].CTRL.bit.DMAENABLE);     // Wait for sync/abort
-          DMAC[inst].CTRL.bit.SWRST = 1;            // Reset all registers
-          while(DMAC[inst].CTRL.bit.SWRST);         // Wait for sync
-
-            // Offset for inst IRQn enum values
-          for (uint32_t i = 0; i < irq_array.size(); i++) {
-            auto curr_irq = static_cast<IRQn_Type>(irq_off + irq_array[i]);
-            NVIC_DisableIRQ(curr_irq);
-            NVIC_ClearPendingIRQ(curr_irq);
-            NVIC_SetPriority(curr_irq, 0);
-          }
-        } 
-        // Compute reg values for and set irq  priority lvl
-        constexpr auto irq_prio_arr = []() consteval {
-          using prio_t = decltype(NVIC_GetPriority(DMAC_0_IRQn));
-          return ([]<uint32_t... Is>(std::integer_sequence<uint32_t, Is...>) consteval {
-            std::array<prio_t, ref::irq_array.size()> prio_arr{};
-
-            // Get reg value for individual priority lvl
-            constexpr auto irq_prio_i = []<uint32_t i>() consteval {
-              constexpr auto prio_val = detail::PeriphConfig::irq_prio.at(i);
-              prio_t prio_reg_f{0};
-              
-              if (prio_val != -1) {
-                constexpr uint32_t prio_reg = std::distance(irqpri_map.begin(),
-                    std::find(irqpri_map.begin(), irqpri_map.end(), prio_val));
-                static_assert(prio_reg < irqpri_map.size(), err_periph_cfg_invalid);
-                prio_reg_f = prio_reg;
-              }
-              return prio_reg_f;
-            }; 
-            // Build up & return array of cfg reg values (fold expr.)
-            return ((prio_arr.at(Is) = irq_prio_i.template operator()<Is>(), prio_arr), ...); 
-          }.operator()<>(std::make_integer_sequence<uint32_t, ref::irq_array.size()>()));
-        }();
-        for (uint32_t i = 0; i < ref::irq_array.size(); i++) {
-          auto irq = static_cast<IRQn_Type>(irq_off + ref::irq_array[i]);
-          NVIC_SetPriority(irq, irq_prio_arr[i]); 
-          NVIC_EnableIRQ(irq);
-        }
-        // Compute masks for and set priority lvl cfg
-        constexpr auto prio_masks = []() consteval {
-          using prictrl_t = decltype(std::declval<DMAC_PRICTRL0_Type>().reg);
-          using ctrl_t = decltype(std::declval<DMAC_CTRL_Type>().reg);
-          return ([]<uint32_t... Is>(std::integer_sequence<uint32_t, Is...>) consteval {
-            std::tuple<prictrl_t, prictrl_t, ctrl_t, ctrl_t> masks{}, temp_masks{};
-
-            // Generate mask for specific priority lvl cfg
-            constexpr auto prictrl_msk_i = []<uint32_t i>() consteval {
-              constexpr auto squal_val = detail::PeriphConfig::prilvl_squal.at(i);
-              constexpr auto rr_val = detail::PeriphConfig::prilvl_rr.at(i);
-              constexpr auto en_val = detail::PeriphConfig::prilvl_en.at(i);
-              prictrl_t set_msk_prio{0}, clr_msk_prio{0};
-              ctrl_t clr_msk_ctrl{0}, set_msk_ctrl{0};
-
-              if (squal_val != -1) {
-                constexpr auto squal_reg = std::distance(squal_map.begin(), 
-                    std::find(squal_map.begin(), squal_map.end(), squal_val));
-                static_assert(squal_reg < squal_map.size(), err_periph_cfg_invalid);
-                
-                uint32_t off = i * (DMAC_PRICTRL0_QOS1_Pos - DMAC_PRICTRL0_QOS0_Pos);
-                clr_msk_prio |= (DMAC_PRICTRL0_QOS0_Msk << off);
-                set_msk_prio |= (squal_reg << (off + DMAC_PRICTRL0_QOS0_Pos));
-              }
-              if (rr_val != -1) {
-                static_assert(rr_val == 0 || rr_val == 1, err_periph_cfg_invalid);
-                uint32_t off = i * (DMAC_PRICTRL0_RRLVLEN1_Pos - DMAC_PRICTRL0_RRLVLEN0_Pos);
-                clr_msk_prio |= (1U << (off + DMAC_PRICTRL0_RRLVLEN0_Pos));
-                set_msk_prio |= (static_cast<bool>(rr_val) << (off + DMAC_PRICTRL0_RRLVLEN0_Pos));
-              }
-              if (en_val != -1) {
-                static_assert(en_val == 0 || en_val == 1, err_periph_cfg_invalid);
-                uint32_t off = i * (DMAC_CTRL_LVLEN1_Pos - DMAC_CTRL_LVLEN0_Pos);
-                clr_msk_ctrl |= (1U << (off + DMAC_CTRL_LVLEN0_Pos));
-                set_msk_ctrl |= (static_cast<bool>(en_val) << (off + DMAC_CTRL_LVLEN0_Pos));
-              }
-              return std::make_tuple(clr_msk_prio, set_msk_prio, clr_msk_ctrl, set_msk_ctrl);
-            };
-            // Iterate over priority lvls & generate masks
-            return ((temp_masks = prictrl_msk_i.template operator()<Is>(),
-                std::get<0>(masks) |= std::get<0>(temp_masks),
-                std::get<1>(masks) |= std::get<1>(temp_masks),
-                std::get<2>(masks) |= std::get<2>(temp_masks),
-                std::get<3>(masks) |= std::get<3>(temp_masks), 
-                masks), ...); 
-          }.operator()<>(std::make_integer_sequence<uint32_t, DMAC_LVL_NUM>()));
-        }();
-        auto [clr_prictrl, set_prictrl, clr_ctrl, set_ctrl] = prio_masks;
-        DMAC[inst].PRICTRL0.reg &= ~clr_prictrl;
-        DMAC[inst].PRICTRL0.reg |= set_prictrl;
-        DMAC[inst].CTRL.reg &= ~clr_ctrl;
-        DMAC[inst].CTRL.reg |= set_ctrl;
-
-        // Set base descriptor memory section address.
-        DMAC[inst].BASEADDR.reg = reinterpret_cast<uintptr_t>(bdesc);
-        DMAC[inst].WRBADDR.reg = reinterpret_cast<uintptr_t>(wbdesc);
         
-        // Enable AHB bus clock, enable priority lvls (by default) & enable DMA
-        MCLK->AHBMASK.reg |= (1 << (DMAC_CLK_AHB_ID + inst));
-        DMAC[inst].CTRL.bit.DMAENABLE = 1;
+
+
       } 
       // Set bit in channel alloc mask & reset channel
       if ((ch_msk & (1 << id)) == 0) {
@@ -1172,7 +1229,13 @@ namespace sioc::dma {
       }
     }
 
-    protected:
+
+
+
+    static inline TransferDescriptor<inst> *btd[ref::max_ch]{nullptr};  // Base transfer descriptor objs
+    static inline volatile bool suspf[ref::max_ch]{false};        // Channel suspend flags
+    static inline callback_t cbarr[ref::max_ch]{nullptr};         // Channel callback func ptrs
+
 
   };
 
@@ -1196,7 +1259,6 @@ namespace sioc::dma {
 
 
 
-  };
     
 
   /// @b COMPLETE_V2
