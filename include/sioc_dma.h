@@ -11,7 +11,7 @@
 #include <type_traits>
 #include <bit>
 #include <Arduino.h>
-#include <functional>
+#include <span>
 
 #define err_ch_cfg_invalid "SIO ERROR: dma channel config invalid."
 #define err_periph_cfg_invalid "SIO ERROR: dma peripheral config invalid."
@@ -368,61 +368,100 @@ namespace sioc::dma {
 
     DmacDescriptor *_descPtr_{&_desc_};
     DmacDescriptor _desc_{};
+    void (*remove_fn)(TransferDescriptor*);
     TransferDescriptor *next{nullptr};
   };
 
 
-  // TO REMOVE
-  constexpr int inst = 0;
-  constexpr int id = 0;
-
-  template<unsigned int inst>
-    requires requires {
-      inst < ref::inst_num;
-      inst < DMAC_INST_NUM;      
-    }
-  struct BasePeripheral 
+  
+  struct BasePeripheral
   {
 
-    /// @a V3_COMPLETE
-    BasePeripheral() = default;
-
-    /// @a V3_COMPLETE
-    template<unsigned int other_inst>
-      requires requires {
-        other_inst < ref::inst_num;
-        other_inst < DMAC_INST_NUM;
+    /// @a FINAL
+    explicit BasePeripheral(const int &inst_num) {
+      if (inst_num >= 0 && inst_num < ref::inst_num && !bp_arr[inst_num]) {
+        bp_arr[inst_num] == this;
+        inst = inst_num;
       }
-    BasePeripheral(const BasePeripheral<other_inst> &other) {
-      this->operator = (other);
     }
 
-    /// @a V3_COMPLETE
-    template<unsigned int other_inst>
-      requires requires {
-        other_inst < ref::inst_num;
-        other_inst < DMAC_INST_NUM;
-      }
-    BasePeripheral<inst> operator = (const BasePeripheral<other_inst> &other) {
-      if (is_init() && other.is_init() && &other != this) [[likely]] {
-
-        // Copy config from registers
-        DMAC[inst].CTRL.reg = DMAC[other_inst].CTRL.reg;
-        DMAC[inst].PRICTRL0.reg = DMAC[other_inst].PRICTRL0.reg;
-
-        // Copy/set irq priority level config
-        constexpr int t_irq_off = ref::irq_array.size() * inst;
-        constexpr int o_irq_off = ref::irq_array.size() * other_inst;
-
-        for (int i = 0; i < ref::irq_array.size(); i++) {
-          auto other_prio = NVIC_GetPriority(static_cast<IRQn_Type>(ref::irq_array[i] + o_irq_off));
-          NVIC_SetPriority(static_cast<IRQn_Type>(ref::irq_array[i] + t_irq_off), other_prio);
+    ///@a FINAL
+    explicit BasePeripheral(BasePeripheral &&other) {
+      if (&other != this) {
+        if (!other.invalid()) {
+          bp_arr[other.inst] = this;
         }
+        inst = std::exchange(other.inst, -1);
+      }
+    } 
+
+    /// @a FINAL
+    BasePeripheral &operator = (const BasePeripheral &other) {
+      set_config(other);      
+    }
+
+    /// @a FINAL
+    BasePeripheral &operator = (BasePeripheral &&other) {
+      if (&other != this) {
+        if (!other.invalid()) {
+          bp_arr[other.inst] = this;
+        }
+        if (!invalid()) {
+          bp_arr[inst] = &other;
+        }
+        std::swap(inst, other.inst);
       }
       return *this;
+    }    
+
+     /// @a FINAL
+    void init() {
+      if (invalid() || is_init()) { return; }
+      exit();
+      // Enable all irq interrupts
+      int irq_off = ref::irq_array.size() * inst;
+      for (int i = 0; i < ref::irq_array.size(); i++) {
+        NVIC_EnableIRQ(static_cast<IRQn_Type>(irq_off + ref::irq_array[i]));
+      }
+      // Set base/writeback mem sections & enable dma/clock
+      DMAC[inst].BASEADDR.reg = reinterpret_cast<uintptr_t>(bdesc);
+      DMAC[inst].WRBADDR.reg = reinterpret_cast<uintptr_t>(wbdesc);
+      MCLK->AHBMASK.reg |= (1 << (DMAC_CLK_AHB_ID + inst));
+      DMAC[inst].CTRL.bit.DMAENABLE = 1;
     }
 
-    /// @a V3_COMPLETE
+    /// @a FINAL
+    void exit() {
+      if (invalid() || !is_init()) { return; }
+      // Disable dma/ahbbus & reset all registers
+      DMAC[inst].CTRL.bit.DMAENABLE = 0;
+      while(DMAC[inst].CTRL.bit.DMAENABLE);
+      DMAC[inst].CTRL.bit.SWRST = 1;
+      while(DMAC[inst].CTRL.bit.SWRST);
+      MCLK->AHBMASK.reg &= ~(1 << (MCLK_AHBMASK_DMAC_Pos + inst));
+
+      // Disable & reset all irq interrupts
+      int irq_off = ref::irq_array.size() * inst;
+      for (int i = 0; i < ref::irq_array.size(); i++) {
+        auto curr_irq = static_cast<IRQn_Type>(ref::irq_array[i] + irq_off);
+        NVIC_DisableIRQ(curr_irq);
+        NVIC_ClearPendingIRQ(curr_irq);
+        NVIC_SetPriority(curr_irq, ref::def_irq_prio);
+      }
+      // Reset fields
+      memset(const_cast<DmacDescriptor*>(wbdesc), 0U, sizeof(wbdesc));
+      memset(bdesc, 0U, sizeof(bdesc));
+
+    }
+
+    /// @a FINAL
+    inline bool is_init() const {
+      if (invalid()) { return false; }
+      auto b_addr = reinterpret_cast<uintptr_t>(bdesc); 
+      return DMAC[inst].CTRL.bit.DMAENABLE && DMAC[inst].BASEADDR.reg == b_addr;
+    }
+
+    /// @a FINAL
     struct Config
     {
       std::array<int32_t, DMAC_LVL_NUM> prilvl_en{-1, -1, -1, -1};             // Priority lvl enabled
@@ -431,10 +470,10 @@ namespace sioc::dma {
       std::array<int32_t, ref::irq_array.size()> irq_prio{-1, -1, -1, -1, -1}; // Irq priority lvl
     };
 
-    /// @a V3_COMPLETE
+    /// @a FINAL
     template<Config cfg>
-    static void set_config() {
-      if (!is_init()) { return; } // #WARN
+    void set_config() {
+      if (invalid() || !is_init()) { return; } // #WARN
       using namespace ref;
 
       // Compute reg values for irq priority
@@ -451,7 +490,8 @@ namespace sioc::dma {
             if constexpr (irq_prio_cfg != -1) {
               constexpr uint32_t prio_reg = std::distance(irqpri_map.begin(),
                   std::find(irqpri_map.begin(), irqpri_map.end(), irq_prio_cfg));
-              static_assert(irq_prio_cfg < irqpri_map.size(), "SIO ERROR: dma config invalid.");
+              static_assert(irq_prio_cfg < irqpri_map.size(), 
+                  "SIO ERROR (DMA): irq_prio config invalid.");
               prio_reg_f = prio_reg;
             }
             return prio_reg_f;
@@ -484,20 +524,23 @@ namespace sioc::dma {
             if constexpr (squal_val != -1) {
               constexpr auto squal_reg = std::distance(squal_map.begin(), 
                   std::find(squal_map.begin(), squal_map.end(), squal_val));
-              static_assert(squal_reg < squal_map.size(), "SIO ERROR: dma config invalid");
+              static_assert(squal_reg < squal_map.size(), 
+                  "SIO ERROR (DMA): prilvl_squal config invalid");
               
               uint32_t off = i * (DMAC_PRICTRL0_QOS1_Pos - DMAC_PRICTRL0_QOS0_Pos);
               clr_msk_prio |= (DMAC_PRICTRL0_QOS0_Msk << off);
               set_msk_prio |= (squal_reg << (off + DMAC_PRICTRL0_QOS0_Pos));
             }
             if constexpr (rr_val != -1) {
-              static_assert(rr_val == 0 || rr_val == 1, "SIO ERROR: dma config invalid");
+              static_assert(rr_val == 0 || rr_val == 1, 
+                  "SIO ERROR (DMA): prilvl_rr config invalid");
               uint32_t off = i * (DMAC_PRICTRL0_RRLVLEN1_Pos - DMAC_PRICTRL0_RRLVLEN0_Pos);
               clr_msk_prio |= (1U << (off + DMAC_PRICTRL0_RRLVLEN0_Pos));
               set_msk_prio |= (static_cast<bool>(rr_val) << (off + DMAC_PRICTRL0_RRLVLEN0_Pos));
             }
             if constexpr (en_val != -1) {
-              static_assert(en_val == 0 || en_val == 1, "SIO ERROR: dma config invalid");
+              static_assert(en_val == 0 || en_val == 1, 
+                  "SIO ERROR (DMA): prilvl_en config invalid");
               uint32_t off = i * (DMAC_CTRL_LVLEN1_Pos - DMAC_CTRL_LVLEN0_Pos);
               clr_msk_ctrl |= (1U << (off + DMAC_CTRL_LVLEN0_Pos));
               set_msk_ctrl |= (static_cast<bool>(en_val) << (off + DMAC_CTRL_LVLEN0_Pos));
@@ -521,99 +564,88 @@ namespace sioc::dma {
       DMAC[inst].CTRL.reg |= set_ctrl;
     }
 
-    /// @a V3_COMPLETE
-    static void init() {
-      if (is_init()) { return; }
-      exit();
-      // Enable all irq interrupts
-      constexpr int irq_off = ref::irq_array.size() * inst;
+    void set_config(const BasePeripheral &other) {
+      if (invalid() || other.invalid() || &other == this) [[unlikely]] { return; }
+      // Copy config from registers
+      DMAC[inst].CTRL.vec.LVLEN = DMAC[other.inst].CTRL.vec.LVLEN;
+      DMAC[inst].PRICTRL0.reg = DMAC[other.inst].PRICTRL0.reg;
+
+      // Copy/set irq priority level config
+      unsigned int t_irq_off = ref::irq_array.size() * inst;
+      unsigned int o_irq_off = ref::irq_array.size() * other.inst;
+
       for (int i = 0; i < ref::irq_array.size(); i++) {
-        NVIC_EnableIRQ(static_cast<IRQn_Type>(irq_off + ref::irq_array[i]));
+        auto other_prio = NVIC_GetPriority(static_cast<IRQn_Type>(ref::irq_array[i] + o_irq_off));
+        NVIC_SetPriority(static_cast<IRQn_Type>(ref::irq_array[i] + t_irq_off), other_prio);
       }
-      // Set base/writeback mem sections & enable dma/clock
-      DMAC[inst].BASEADDR.reg = reinterpret_cast<uintptr_t>(bdesc);
-      DMAC[inst].WRBADDR.reg = reinterpret_cast<uintptr_t>(wbdesc);
-      MCLK->AHBMASK.reg |= (1 << (DMAC_CLK_AHB_ID + inst));
-      DMAC[inst].CTRL.bit.DMAENABLE = 1;
     }
 
-    /// @a V3_COMPLETE
-    static void exit() {
-      if (!is_init()) { return; }
-      // Disable dma/ahbbus & reset all registers
-      DMAC[inst].CTRL.bit.DMAENABLE = 0;
-      while(DMAC[inst].CTRL.bit.DMAENABLE);
-      DMAC[inst].CTRL.bit.SWRST = 1;
-      while(DMAC[inst].CTRL.bit.SWRST);
-      MCLK->AHBMASK.reg &= ~(1 << (MCLK_AHBMASK_DMAC_Pos + inst));
+    unsigned int active_channel_count() const {
+      unsigned int count{0};
+      for (int i = 0; i < ref::ch_num; i++) {
+        if (DMAC[inst].Channel[i].CHSTATUS.bit.BUSY && Channel<3>)
 
-      // Disable & reset all irq interrupts
-      constexpr int irq_off = ref::irq_array.size() * inst;
-      for (int i = 0; i < ref::irq_array.size(); i++) {
-        auto curr_irq = static_cast<IRQn_Type>(ref::irq_array[i] + irq_off);
-        NVIC_DisableIRQ(curr_irq);
-        NVIC_ClearPendingIRQ(curr_irq);
-        NVIC_SetPriority(curr_irq, ref::def_irq_prio);
       }
-      // Reset fields
-      memset(const_cast<DmacDescriptor*>(wbdesc), 0U, sizeof(wbdesc));
-      memset(bdesc, 0U, sizeof(bdesc));
-      alloc_msk = 0;
-    }
 
-    /// @a V3_COMPLETE
-    static inline bool is_init() {
-      auto b_addr = reinterpret_cast<uintptr_t>(bdesc); 
-      return DMAC[inst].CTRL.bit.DMAENABLE && DMAC[inst].BASEADDR.reg == b_addr;
-    }
+    }    
+
+
+
 
     protected:
-      static inline uint32_t alloc_msk{0};
-      static inline DmacDescriptor bdesc[ref::max_ch]{};            // Base transfer descriptor
-      static inline DmacDescriptor wbdesc[ref::max_ch]{};           // Writeback transfer descriptors
+      friend Channel;
+
+      int inst{-1};
+      DmacDescriptor bdesc[ref::ch_num]{};
+      volatile DmacDescriptor wbdesc[ref::ch_num]{};
+
+      std::array<Channel*, ref::ch_num> ch_arr{nullptr};
+      static inline std::array<BasePeripheral*, ref::inst_num> bp_arr{nullptr};
+
+      bool invalid() const {
+        return inst < 0 || inst >= ref::inst_num;
+      }
   };
+
+
 
 
   struct Channel
   {
 
-    /// @a V2_COMPLETE
-    Channel() {
-      if (!ch_msk) [[unlikely]] { 
-        using namespace ref;
-        
+    /// @a COMPLETE_V2
+    Channel() = default;
 
-
-      } 
-      // Set bit in channel alloc mask & reset channel
-      if ((ch_msk & (1 << id)) == 0) {
-        ch_msk |= (1 << id); 
-        if (DMAC[inst].Channel[id].CHCTRLA.reg != DMAC_CHCTRLA_RESETVALUE) {
-          DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE = 0;      // Disable channel
-          while(DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE);   // Wait for sync/abort
-          DMAC[inst].Channel[id].CHCTRLA.bit.SWRST;           // Reset all registers
-          while(DMAC[inst].Channel[id].CHCTRLA.bit.SWRST);    // Wait for sync
-        }
+    /// @a COMPLETE_V2
+    template<unsigned int other_inst, unsigned int other_id>
+      requires requires {
+        other_inst < ref::inst_num;
+        other_id < ref::ch_num;
       }
-    }
-
-    /// @a V2_COMPLETE
-    template<int other_inst, int other_id>
-    explicit Channel(const Channel<other_inst, other_id> &other) : Channel() {
+    explicit Channel(const Channel<other_inst, other_id> &other) {
       this->operator = (other);
     }
 
-    /// @a V2_COMPLETE
-    template<int other_inst, int other_id>
+    /// @a COMPLETE_V2
+    template<unsigned int other_inst, unsigned int other_id>
+      requires requires {
+        other_inst < ref::inst_num;
+        other_id < ref::ch_num;
+      }
     explicit Channel(Channel<other_inst, other_id> &&other) {
       this->operator = (std::move(other));
     }
 
-    /// @a TODO
-    template<int other_inst, int other_id>
+    /// @a COMPLETE_V2
+    template<unsigned int other_inst, unsigned int other_id>
+      requires requires {
+        other_inst < ref::inst_num;
+        other_id < ref::ch_num;
+      }
     Channel &operator = (const Channel<other_inst, other_id> &other) {
       if (&other != this) [[likely]] {
-        /// todo
+        set_channel_config(other);
+        set_interrupt_config(other);
       }
       return *this;
     }
@@ -622,13 +654,13 @@ namespace sioc::dma {
     template<int other_inst, int other_id>
     Channel &operator = (Channel<other_inst, other_id> &&other) {
       if (&other != this) [[likely]] {
-        /// todo
+
       }
       return *this;
     }
 
-    /// @a V2_COMPLETE
-    struct ChannelConfig 
+    /// @a COMPLETE_V2
+    struct TransferConfig 
     {
       int32_t burstlen   = -1; // > Numeric 
       trigsrc_t trigsrc  = trigsrc_t::null;
@@ -638,10 +670,11 @@ namespace sioc::dma {
       int32_t runstdby   = -1; // > Boolean cond
     };
 
-    /// @a V2_COMPLETE
+    /// @a COMPLETE_V2
     template<ChannelConfig cfg>
-    static void set_channel_config() {
+    void set_transfer_config() {
       using namespace ref;
+
       bool prev_en = DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE; // Capture prev enable state
       DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE = 0;            // Disable channel
       while(DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE);         // Wait for sync/abort
@@ -651,32 +684,35 @@ namespace sioc::dma {
         using ctrl_t = decltype(std::declval<DMAC_CHCTRLA_Type>().reg);
         ctrl_t clr_msk{0}, set_msk{0};
 
-        if (cfg.burstlen != -1) {
+        if constexpr (cfg.burstlen != -1) {
           constexpr uint32_t bl_reg = std::distance(burstlen_map.begin(),
               std::find(burstlen_map.begin(), burstlen_map.end(), cfg.burstlen));
-          static_assert(cfg.burstlen == -1 || bl_reg < burstlen_map.size(), err_ch_cfg_invalid);
+          static_assert(bl_reg < burstlen_map.size(), 
+              "SIO ERROR (DMA): burstlen config invalid.");
 
           clr_msk |= (DMAC_CHCTRLA_BURSTLEN_Msk);
           set_msk |= (bl_reg << DMAC_CHCTRLA_BURSTLEN_Pos);
         }
-        if (cfg.threshold != -1) {
+        if constexpr (cfg.threshold != -1) {
           constexpr uint32_t th_reg = std::distance(threshold_map.begin(),
               std::find(threshold_map.begin(), threshold_map.end(), cfg.threshold));
-          static_assert(cfg.threshold == -1 || th_reg < threshold_map.size(), err_ch_cfg_invalid);
+          static_assert(th_reg < threshold_map.size(), 
+              "SIO ERROR (DMA): threshold config invalid.");
 
           clr_msk |= (DMAC_CHCTRLA_THRESHOLD_Msk);
           set_msk |= (th_reg << DMAC_CHCTRLA_THRESHOLD_Pos);
         }
-        if (cfg.trigsrc != trigsrc_t::null) {
+        if constexpr (cfg.trigsrc != trigsrc_t::null) {
           clr_msk |= (DMAC_CHCTRLA_TRIGSRC_Msk);
           set_msk |= (static_cast<uint32_t>(cfg.trigsrc) << DMAC_CHCTRLA_TRIGSRC_Pos);
         }
-        if (cfg.trigact != trigact_t::null) {
+        if constexpr (cfg.trigact != trigact_t::null) {
           clr_msk |= (DMAC_CHCTRLA_TRIGACT_Msk);
           set_msk |= (static_cast<uint32_t>(cfg.trigact) << DMAC_CHCTRLA_TRIGACT_Pos);
         }
-        if (cfg.runstdby != -1) {
-          static_assert(cfg.runstdby == 0 || cfg.runstdby == 1, err_ch_cfg_invalid);
+        if constexpr (cfg.runstdby != -1) {
+          static_assert(cfg.runstdby == 0 || cfg.runstdby == 1, 
+              "SIO ERROR (DMA): runstdby config invalid");
           clr_msk |= (DMAC_CHCTRLA_RUNSTDBY);
           set_msk |= (static_cast<bool>(cfg.runstdby) << DMAC_CHCTRLA_RUNSTDBY_Pos);
         }
@@ -690,10 +726,11 @@ namespace sioc::dma {
         using prictrl_t = decltype(std::declval<DMAC_PRICTRL0_Type>().reg);
         prictrl_t clr_msk{0}, set_msk{0};
 
-        if (cfg.prilvl != -1) {
+        if constexpr (cfg.prilvl != -1) {
           constexpr uint32_t plvl_reg = std::distance(prilvl_map.begin(),
               std::find(prilvl_map.begin(), prilvl_map.end(), cfg.prilvl));
-          static_assert(cfg.prilvl == -1 || plvl_reg < prilvl_map.size(), err_ch_cfg_invalid);
+          static_assert(plvl_reg < prilvl_map.size(), 
+              "SIO ERROR (DMA): ch prilvl config invalid.");
 
           clr_msk |= (DMAC_CHPRILVL_PRILVL_Msk);
           set_msk |= (plvl_reg << DMAC_CHPRILVL_PRILVL_Pos);
@@ -705,25 +742,28 @@ namespace sioc::dma {
       DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE = prev_en; // > Re-enable channel 
     }
 
-    /// @a V2_COMPLETE
-    template<int other_inst, int other_id>
-    static void set_channel_config(const Channel<other_inst, other_id> &other) {
+    /// @a COMPLETE_V2
+    template<unsigned int other_inst, unsigned int other_id>
+      requires requires {
+        other_inst < ref::inst_num;
+        other_id < ref::ch_num;
+      }
+    void set_channel_config(const Channel<other_inst, other_id> &other) {
       if (&other != this) {
         // Capture enable state & disable channel
         const bool prev_en = DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE;
         DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE = 0;
         while(DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE);
         
-        // Clear and set (with other) -> ctrl & prilvl registers
-        DMAC[inst].Channel[id].CHCTRLA.reg &= ~DMAC_CHCTRLA_MASK;
-        DMAC[inst].Channel[id].CHPRILVL.reg &= ~DMAC_CHPRILVL_MASK;
-        DMAC[inst].Channel[id].CHCTRLA.reg |= DMAC[other.inst].Channel[other.id].CHCTRLA.reg;
-        DMAC[inst].Channel[id].CHPRILVL.reg |= DMAC[other.inst].Channel[other.id].CHPRILVL.reg;
+        // Clear and set (with other) -> prilvl & ctrl registers
+        DMAC[inst].Channel[id].CHPRILVL.reg = DMAC[other_inst].Channel[other_id].CHPRILVL.reg;
+        DMAC[inst].Channel[id].CHCTRLA.reg = (DMAC[other_inst].Channel[other_id].CHCTRLA.reg 
+            & ~(DMAC_CHCTRLA_ENABLE | DMAC_CHCTRLA_SWRST));
         DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE = prev_en; // > Re-enable channel
       }
     }
     
-    /// @a V2_COMPLETE
+    /// @a COMPLETE_V2
     struct InterruptConfig
     {
       callback_t cb      = &detail::dummy_cb;
@@ -732,23 +772,29 @@ namespace sioc::dma {
       int32_t tcmpl_int  = -1; // > Boolean cond
     };
 
-    /// @a V2_COMPLETE
+    /// @a COMPLETE_V2
     template<InterruptConfig cfg>
-    static void set_interrupt_config() {
+    void set_interrupt_config() {
       // Compute and set masks for interrupt cfg reg
       constexpr auto chint_masks = [&]() consteval {
         using inten_t = decltype(std::declval<DMAC_CHINTENSET_Type>().reg);
         inten_t clr_msk{0}, set_msk{0};
 
-        if (cfg.susp_int != -1) {
+        if constexpr (cfg.susp_int != -1) {
+          static_assert(cfg.susp_int == 0 || cfg.susp_int == 1, 
+              "SIO ERROR (DMA): ch susp_int config invalid");
           clr_msk |= (DMAC_CHINTENCLR_SUSP);
           set_msk |= (static_cast<bool>(cfg.susp_int) << DMAC_CHINTENSET_SUSP_Pos);
         }
-        if (cfg.err_int != -1) {
+        if constexpr (cfg.err_int != -1) {
+          static_assert(cfg.err_int == 0 || cfg.err_int == 1, 
+              "SIO ERROR (DMA): ch err_int config invalid");
           clr_msk |= (DMAC_CHINTENCLR_TERR);
           set_msk |= (static_cast<bool>(cfg.err_int) << DMAC_CHINTENSET_TERR_Pos);
         }
-        if (cfg.tcmpl_int != -1) {
+        if constexpr (cfg.tcmpl_int != -1) {
+          static_assert(cfg.tcmpl_int == 0 || cfg.tcmpl_int == 1, 
+              "SIO ERROR (DMA): ch tcmpl_int config invalid");
           clr_msk |= (DMAC_CHINTENCLR_TCMPL);
           set_msk |= (static_cast<bool>(cfg.tcmpl_int) << DMAC_CHINTENSET_TCMPL_Pos);
         }
@@ -763,16 +809,16 @@ namespace sioc::dma {
       }
     }
 
-    /// @a V2_COMPLETE
+    /// @a COMPLETE_V2
     template<int other_inst, int other_id>
-    static void set_interrupt_config(const Channel<other_inst, other_id> &other) {
+    void set_interrupt_config(const Channel<other_inst, other_id> &other) {
       if (&other != this) {
         DMAC[inst].Channel[id].CHINTENSET.reg |= DMAC[other_inst].Channel[other_id].CHINTENSET.reg;
         cbarr[id] = other.cbarr[other_id];
       }
     }
 
-    /// @a V2_COMPLETE
+    /// @a TODO
     static void reset(const bool &clear_transfer = true) {
       if (clear_transfer) {
         Channel<inst, id>::descriptor_list.clear_transfer();
@@ -790,7 +836,7 @@ namespace sioc::dma {
       suspf[id] = false;
     }
 
-    /// @a V2_COMPLETE
+    /// @a TODO
     static bool set_state(const channel_state_t &state) {
       channel_state_t i_state = Channel<inst, id>::state();
       if (state != i_state) {
@@ -819,7 +865,7 @@ namespace sioc::dma {
       return state == Channel<inst, id>::state();
     }
 
-    /// @b COMPLETE_V2
+    /// @b TODO
     static inline channel_state_t state() {
       if (!DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE) {
         return channel_state_t::disabled;
@@ -829,27 +875,27 @@ namespace sioc::dma {
       return channel_state_t::enabled;
     }
 
-    /// @b TESTED_V1
+    /// @b TODO
     static inline void trigger() {
       DMAC[inst].SWTRIGCTRL.reg |= (1 << (id + DMAC_SWTRIGCTRL_SWTRIG0_Pos));
     }
 
-    /// @b TESTED_V1
+    /// @b TODO
     inline bool trigger_pending() {
       return DMAC[inst].Channel[id].CHSTATUS.bit.PEND;
     }
 
-    /// @b TESTED_V1
+    /// @b TODO
     static inline bool transfer_busy() {
       return DMAC[inst].Channel[id].CHSTATUS.bit.BUSY
           && state() != channel_state_t::suspended;
     }
 
     /// descriptor_list
-    /// @b TODO->UPDATE_SUPER
+    /// @b TODO
     static struct { 
 
-      /// @b COMPLETE_V2
+      /// @b TODO
       void clear() {
         if (btd[id]) {
           // Disable channel & clear writeback
@@ -871,7 +917,7 @@ namespace sioc::dma {
         }
       }
 
-      /// @b COMPLETE_V2
+      /// @b TODO
       void set(std::initializer_list<TransferDescriptor*> desclist, const bool &looped) {
         if (desclist.size() > 0) {
           bool prev_en = DMAC[inst].Channel[id].CHCTRLA.bit.ENABLE;
@@ -910,7 +956,7 @@ namespace sioc::dma {
         }
       }
 
-      /// @b COMPLETE_V2
+      /// @b TODO
       void set(TransferDescriptor *td, const bool &looped) {
         if (!valid_channel()) { return; }
         if (td) {
@@ -959,7 +1005,7 @@ namespace sioc::dma {
         return add_index;
       }
 
-      /// @b COMPLETE_V1
+      /// @b TODO
       void remove(TransferDescriptor &td) {
         if (!valid_channel()) { return; }
         auto &comm = detail::InstCommon[inst];
@@ -996,7 +1042,7 @@ namespace sioc::dma {
         td.assig.id = -1;
       }
 
-      /// @b COMPLETE_V1
+      /// @b TODO
       uint32_t index_of(TransferDescriptor &td) {
         uint32_t index{-1};
         if (valid_channel()) {
@@ -1016,6 +1062,7 @@ namespace sioc::dma {
         return -1;
       }
 
+      /// @a TODO
       TransferDescriptor *get(const uint32_t &index) {
         if (!valid_channel()) { return; }
         auto &comm = detail::InstCommon[inst];
@@ -1042,7 +1089,7 @@ namespace sioc::dma {
     /// active_transfer
     static struct {
 
-       /// @b TESTED_V1
+      /// @b TODO
       void sync(const bool &sync_in_prog = false, 
         const bool &keep_length = false) {
         if (!valid_channel()) { return; }
@@ -1071,7 +1118,7 @@ namespace sioc::dma {
         }
       }
 
-      /// @b TESTED_V1
+      /// @b TODO
       void set(uint32_t td_index) {
         if (!valid_channel()) { return; }
         auto &comm = detail::InstCommon[inst];
@@ -1090,7 +1137,7 @@ namespace sioc::dma {
         }
       }
 
-      /// @b TESTED_V1
+      /// @b TODO
       void set(TransferDescriptor *td, const bool &keep_link = true) {
         if (!valid_channel()) { return; }
         auto &comm = detail::InstCommon[inst];
@@ -1114,7 +1161,7 @@ namespace sioc::dma {
           }
         }
       }
-      /// @b TESTED_V1
+      /// @b TODO
       TransferDescriptor *source_td() const {
         if (!valid_channel()) { return nullptr; }
         auto &comm = detail::InstCommon[inst];
@@ -1133,7 +1180,7 @@ namespace sioc::dma {
         return active;
       }
 
-      /// @b TESTED_V1
+      /// @b TODO
       int32_t index() const {
         if (!valid_channel()) { return -1; }
         auto &comm = detail::InstCommon[inst];
@@ -1153,7 +1200,7 @@ namespace sioc::dma {
         }
       }
 
-      /// @b TESTED_V1
+      /// @b TODO
       void length(const uint32_t &length, const bool &in_bytes) {
         if (!valid_channel()) { return; }
         auto &comm = detail::InstCommon[inst];
@@ -1177,7 +1224,7 @@ namespace sioc::dma {
         }
       }
 
-      /// @b TESTED_V1
+      /// @b TODO
       int32_t set_length(const bool &in_bytes) const {
         if (!valid_channel()) { return -1; }
         auto &comm = detail::InstCommon[inst];
@@ -1193,9 +1240,7 @@ namespace sioc::dma {
       }
       
     }active_transfer;
-   
-
-   
+  
 
     /// @b COMPLETE_V1
     ~Channel() {
@@ -1229,15 +1274,20 @@ namespace sioc::dma {
       }
     }
 
+    void test() {
+      memcpy(bdesc[id], 0U, detail::_dsize_);
 
+    }
 
-
-    static inline TransferDescriptor<inst> *btd[ref::max_ch]{nullptr};  // Base transfer descriptor objs
-    static inline volatile bool suspf[ref::max_ch]{false};        // Channel suspend flags
-    static inline callback_t cbarr[ref::max_ch]{nullptr};         // Channel callback func ptrs
-
-
+    protected:
+      friend BasePeripheral;
+      BasePeripheral &bp;
+      callback_t cbarr{nullptr};
+      TransferDescriptor *btd{nullptr};
+      volatile bool suspf[ref::ch_num]{false};
   };
+
+
 
   /// @b TODO
   uint32_t free_channel_count() {

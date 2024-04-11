@@ -10,7 +10,6 @@ namespace sioc::dma::ref {
   inline constexpr uint32_t ch_num = 16;
   inline constexpr uint32_t inst_num = DMAC_INST_NUM;
   inline constexpr uint32_t def_irq_prio = 0;
-
   //// DMA SYSTEM ////
   inline constexpr std::array<uint32_t, 5>                       irq_array = {31, 32, 33, 34, 35};
   inline constexpr std::array<uint32_t, (1 << __NVIC_PRIO_BITS)> irqpri_map = {1, 2, 3, 4, 5, 6, 7, 8};
