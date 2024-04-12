@@ -11,7 +11,7 @@
 #include <type_traits>
 #include <bit>
 #include <Arduino.h>
-#include <span>
+#include <vector>
 
 #define err_ch_cfg_invalid "SIO ERROR: dma channel config invalid."
 #define err_periph_cfg_invalid "SIO ERROR: dma peripheral config invalid."
@@ -20,15 +20,13 @@
 
 namespace sioc::dma {
 
-  struct TransferDescriptor;
-
+ 
   namespace detail {
 
     inline struct {}dummy_loc;
     inline void dummy_cb(const uint32_t &a, const callback_flag_t &b) { }
     inline constexpr size_t _dsize_ = sizeof(DmacDescriptor);
     using dumm_t = decltype(detail::dummy_loc);
-    using remove_fn = void (*)(TransferDescriptor*);
 
     /// @b COMPLETE_V2
     inline void update_valid(DmacDescriptor &desc) {
@@ -85,188 +83,81 @@ namespace sioc::dma {
 
   } // END OF ANON NAMESPACE 
 
+  // constexpr int inst = 3;
+  // constexpr int id = 3;
+  // constexpr int key = 3;
 
 
-  struct TransferDescriptor
+  //// FORWARD DECLS ////
+
+  template<unsigned int inst>
+    requires(inst < ref::inst_num)
+  struct BasePeripheral;
+
+  template<unsigned int inst, unsigned int id>
+    requires requires {
+      inst < ref::inst_num;
+      id < ref::ch_num;
+    }
+  struct Channel;
+
+
+
+
+
+  template<unsigned int ch_inst, unsigned int ch_id, unsigned int td_id>
+  struct TransferDescriptor 
   {
-    
-    /// @b COMPLETE_V2
-    TransferDescriptor() = default;
 
-    /// @b COMPLETE_V2
-    TransferDescriptor(const TransferDescriptor &other) {
-      this->operator = (other);
-    }
-
-    /// @b COMPLETE_V1
-    TransferDescriptor(TransferDescriptor &&other) {
-      this->operator = (std::move(other));
-    }
-
-    /// @b TESTED_V1
-    TransferDescriptor &operator = (const TransferDescriptor &other) {
-      if (&other != this) {
-        auto l_addr = _descPtr_->DESCADDR.reg;
-        memcpy(_descPtr_, other._descPtr_, detail::_dsize_);
-        _descPtr_->DESCADDR.reg = l_addr;
-      }
-      return *this;
-    }
-
-    /// @b TODO
-    TransferDescriptor &operator = (TransferDescriptor &&other) {
-      if (&other != this) {
-        auto crit = detail::SuspendSection(other.assig.inst, other.assig.id);
-        //unlink(); 
-        // Get other's descriptor or ptr (if base only)
-        if (other._descPtr_ != &other._desc_) {
-          _descPtr_ = std::exchange(other._descPtr_, &other._desc_);
-        } else {
-          memcpy(&_desc_, &other._desc_, detail::_dsize_);
-        }
-        // Relink prev/writeback if other is linked
-        if (other.assig.inst != -1 && other.assig.id != -1) {
-          auto &comm = detail::InstCommon[other.assig.inst];
-          TransferDescriptor *prev = comm.btd[other.assig.id];
-          do {
-            if (prev->next == &other) {
-              auto l_addr = reinterpret_cast<uintptr_t>(_descPtr_); 
-              if (comm.wbdesc[other.assig.id].DESCADDR.reg == 
-                  prev->_descPtr_->DESCADDR.reg) {
-                comm.wbdesc[other.assig.id].DESCADDR.reg = l_addr;
-              }
-              prev->_descPtr_->DESCADDR.reg = l_addr;
-              prev->next = this;
-            }
-          } while(prev && prev != comm.btd[other.assig.id]);
-          if (_descPtr_ != &_desc_) {
-            comm.btd[other.assig.id] = this;
-          }
-        } // Exchange fields
-        next = std::exchange(other.next, nullptr);
-        assig.inst = std::exchange(other.assig.inst, -1);
-        assig.id = std::exchange(other.assig.id, -1);
-      }
-      return *this;
-    }
-
-    /// @b TESTED_V1
-    void swap(TransferDescriptor &other, const bool &swap_descriptors = true) {
-      if (&other != this) {
-        auto crit_o = detail::SuspendSection(other.assig.inst, other.assig.id);
-        auto crit_t = detail::SuspendSection(assig.inst, assig.id);
-
-        if (swap_descriptors) { // Swap descriptors or ptrs (if base only)
-          DmacDescriptor *this_ptr{_descPtr_}; 
-          DmacDescriptor this_desc{};
-          memcpy(&this_desc, _descPtr_, detail::_dsize_);
-
-          if (other._descPtr_ != &other._desc_) {
-            _descPtr_ = other._descPtr_;
-          } else {
-            memcpy(&_desc_, &other._desc_, detail::_dsize_);
-            _descPtr_ = &_desc_;
-          }
-          if (this_ptr != &_desc_) {
-            other._descPtr_ = this_ptr;
-          } else {
-            memcpy(&other._desc_, &this_desc, detail::_dsize_);
-            other._descPtr_ = &other._desc_;
-          }
-        } else { // If this/other = base -> move this/other into & out of base mem
-          if (other._descPtr_ != &other._desc_ && _descPtr_ != &_desc_) {
-            DmacDescriptor this_temp{};
-            memcpy(&this_temp, _descPtr_, detail::_dsize_);
-            memcpy(_descPtr_, other._descPtr_, detail::_dsize_);
-            memcpy(other._descPtr_, &this_temp, detail::_dsize_);
-
-          } else if (other._descPtr_ != &other._desc_) {
-            memcpy(&other._desc_, other._descPtr_, detail::_dsize_);
-            memcpy(&other._descPtr_, &_desc_, detail::_dsize_);
-            _descPtr_ = std::exchange(other._descPtr_, &other._desc_);
-          
-          } else if (_descPtr_ != &_desc_) {
-            memcpy(&_desc_, _descPtr_, detail::_dsize_);
-            memcpy(_descPtr_, &other._desc_, detail::_dsize_);
-            other._descPtr_ = std::exchange(_descPtr_, &_desc_);
-          }
-          std::swap(_descPtr_->DESCADDR.reg, other._descPtr_->DESCADDR.reg);
-        }
-        // Relink other's prev -> this & this prev -> other
-        auto relink_prev = [&](TransferDescriptor &old, TransferDescriptor &targ) {
-          if (old.assig.inst != -1 && old.assig.id != -1) {
-            auto &comm = detail::InstCommon[old.assig.inst];
-            auto wb = const_cast<DmacDescriptor*>(&comm.wbdesc[targ.assig.id]);
-            TransferDescriptor *prev = comm.btd[old.assig.id];
-            do {
-              if (prev->next == &old) {
-                auto new_addr = reinterpret_cast<uintptr_t>(targ._descPtr_);
-                if (wb->DESCADDR.reg == prev->_descPtr_->DESCADDR.reg) {
-                  comm.wbdesc[targ.assig.id].DESCADDR.reg = new_addr;
-                }
-                prev->_descPtr_->DESCADDR.reg = new_addr;
-                prev->next = &targ;
-              }
-              prev = prev->next;
-            } while(prev && prev != comm.btd[old.assig.id]);
-          }
-        };
-        relink_prev(other, *this);
-        relink_prev(*this, other);
-
-        // Reassign base td & swap fields
-        if (_descPtr_ != &_desc_) {
-          detail::InstCommon[other.assig.inst].btd[other.assig.id] = this;
-        }
-        if (other._descPtr_ != &other._desc_) {
-          detail::InstCommon[assig.inst].btd[assig.id] = &other;
-        }
-        std::swap(assig, other.assig);
-        std::swap(next, other.next);
-        detail::update_valid(*_descPtr_);
-        detail::update_valid(*other._descPtr_);
-      }
-    }
-
-    /// @b TESTED_V2
+    /// @b FINAL_V1
     template<typename src_t = detail::dumm_t, 
              typename dst_t = detail::dumm_t>
+      requires requires {
+        std::is_trivially_copyable_v<std::conditional_t
+            <std::is_same_v<src_t, detail::dumm_t>, int, src_t>>;
+        std::is_trivially_copyable_v<std::conditional_t
+            <std::is_same_v<dst_t, detail::dumm_t>, int, dst_t>>;
+        !std::is_void_v<src_t>;
+        !std::is_void_v<dst_t>;
+      }
     struct Config 
     {
-      uint32_t beatsize   = -1; // > numeric
+      uint32_t beatsize   = -1;                 // > numeric
       src_t *src          = &detail::dummy_loc; // > ptr
-      int32_t srcinc      = -1; // > numeric
+      int32_t srcinc      = -1;                 // > numeric
       dst_t *dst          = &detail::dummy_loc; // > ptr
-      int32_t dstinc      = -1; // > numeric
-      blockact_t blockact = blockact_t::null;
+      int32_t dstinc      = -1;                 // > numeric
+      blockact_t blockact = blockact_t::null;   // > enum (blockact_t)
     };
 
-    /// @b TESTED_V2
-    template<Config cfg>
-    void set_config() {
+    /// @b FINAL_V1
+    template<typename src_t, typename dst_t, Config &cfg>
+    void set_config(const Config<src_t, dst_t> &cfg) {
       using namespace ref;
+
       _descPtr_->BTCTRL.bit.VALID = 0;
       auto prev_bs = beatsize_map[_descPtr_->BTCTRL.bit.BEATSIZE];
       uintptr_t prev_srcaddr{0}, prev_dstaddr{0};
 
       // Capture previous, non-modified address if beatsize changed
       if (cfg.beatsize != -1 && prev_bs != cfg.beatsize) {
-        if constexpr (std::is_same_v<std::remove_pointer_t<decltype(cfg.src)>, detail::dumm_t>) {
+        if constexpr (std::is_same_v<src_t, detail::dumm_t>) {
           prev_srcaddr = _descPtr_->SRCADDR.reg - detail::addr_mod(*_descPtr_, true);
         }
-        if constexpr (std::is_same_v<std::remove_pointer_t<decltype(cfg.dst)>, detail::dumm_t>) {
+        if constexpr (std::is_same_v<dst_t, detail::dumm_t>) {
           prev_dstaddr = _descPtr_->DSTADDR.reg - detail::addr_mod(*_descPtr_, false);
         }
       }
       // Compute ctrl register mask
-      constexpr auto btctrl_masks = [&]() consteval {
-        using ctrl_t = decltype(std::declval<DMAC_BTCTRL_Type>().reg);        
+      constexpr auto btctrl_masks = []() consteval {
+        using ctrl_t = decltype(std::declval<DMAC_BTCTRL_Type>().reg);
         ctrl_t clr_msk{0}, set_msk{0};
 
         if constexpr (cfg.beatsize != -1) {
           constexpr uint32_t bs_reg = std::distance(beatsize_map.begin(), 
               std::find(beatsize_map.begin(), beatsize_map.end(), cfg.beatsize));  
-          static_assert(bs_reg < beatsize_map.size(), err_desc_cfg_invalid);
+          static_assert(bs_reg < beatsize_map.size(), 
+              "SIO ERROR (DMA): descriptor config invalid. ");
 
           clr_msk |= (DMAC_BTCTRL_BEATSIZE_Msk);
           set_msk |= (bs_reg << DMAC_BTCTRL_BEATSIZE_Pos);
@@ -274,7 +165,8 @@ namespace sioc::dma {
         if constexpr (std::max(cfg.srcinc, cfg.dstinc) > 1) {
           constexpr uint32_t ssize_r = std::distance(stepsize_map.begin(), std::find
               (stepsize_map.begin(), stepsize_map.end(), std::max(cfg.srcinc, cfg.dstinc)));
-          static_assert(ssize_r < stepsize_map.size(), err_desc_cfg_invalid);
+          static_assert(ssize_r < stepsize_map.size(), 
+              "SIO ERROR (DMA): descriptor config invalid.");
 
           clr_msk |= (DMAC_BTCTRL_STEPSIZE_Msk);
           set_msk |= (ssize_r << DMAC_BTCTRL_STEPSIZE_Pos);
@@ -288,12 +180,12 @@ namespace sioc::dma {
           set_msk |= (static_cast<bool>(cfg.dstinc) << DMAC_BTCTRL_DSTINC_Pos);
         }
         if constexpr (cfg.srcinc > 1) {
-          static_assert(cfg.dstinc <= 1, err_desc_cfg_invalid); 
+          static_assert(cfg.dstinc <= 1, "SIO ERROR (DMA): descriptor config invalid."); 
           clr_msk |= (DMAC_BTCTRL_STEPSEL);
           set_msk |= (DMAC_BTCTRL_STEPSEL_SRC);
         }
         if constexpr (cfg.dstinc > 1) {
-          static_assert(cfg.srcinc <= 1, err_desc_cfg_invalid);
+          static_assert(cfg.srcinc <= 1, "SIO ERROR (DMA): descriptor config invalid");
           clr_msk |= (DMAC_BTCTRL_STEPSEL);
           set_msk |= (DMAC_BTCTRL_STEPSEL_DST);
         }
@@ -307,15 +199,15 @@ namespace sioc::dma {
       _descPtr_->BTCTRL.reg |= btctrl_masks.second;
 
       // Set source address or re-calc previous if beatsize changed
-      if constexpr (!std::is_same_v<std::remove_pointer_t<decltype(cfg.src)>, detail::dumm_t>) {
-        _descPtr_->SRCADDR.reg = cfg.src ? (uintptr_t)cfg.src 
+      if constexpr (!std::is_same_v<src_t, detail::dumm_t>) {
+        _descPtr_->SRCADDR.reg = cfg.src ? static_cast<uintptr_t>((void*)cfg.src)
             + detail::addr_mod(*_descPtr_, true) : 0;
       } else if (cfg.beatsize != -1 && prev_bs != cfg.beatsize) {
         _descPtr_->SRCADDR.reg = prev_srcaddr + detail::addr_mod(*_descPtr_, true);
       }
       // Set destination address or re-calc prev if beatsize changedd
-      if constexpr (!std::is_same_v<std::remove_pointer_t<decltype(cfg.dst)>, detail::dumm_t>) {
-        _descPtr_->DSTADDR.reg = cfg.dst ? (uintptr_t)cfg.dst 
+      if constexpr (!std::is_same_v<dst_t, detail::dumm_t>) {
+        _descPtr_->DSTADDR.reg = cfg.dst ? static_cast<uintptr_t>((void*)cfg.dst)
             + detail::addr_mod(*_descPtr_, false) : 0;
       } else if (cfg.beatsize != -1 && prev_bs != cfg.beatsize) {
         _descPtr_->DSTADDR.reg = prev_dstaddr + detail::addr_mod(*_descPtr_, false);
@@ -323,7 +215,35 @@ namespace sioc::dma {
       detail::update_valid(*_descPtr_);
     }
 
-    /// @b TESTED_V1
+    /// @a FINAL_V1
+    template<unsigned int och_inst, unsigned int och_id, unsigned int otd_id>
+      requires requires {
+        och_inst < ref::inst_num;
+        och_id < ref::ch_num;
+      }
+    void set_config(const TransferDescriptor<och_inst, och_id, otd_id> &other) {
+      if (&other == this) [[unlikely]] { return; }
+      _descPtr_->BTCTRL.bit.VALID = 0;
+      auto prev_link = _descPtr_->DESCADDR.reg;
+      
+      memcpy(_descPtr_, other._descPtr_, detail::_dsize_);
+      _descPtr_->DESCADDR.reg == prev_link;
+      detail::update_valid(*_descPtr_);
+      detail::update_valid(*other._descPtr_);
+    }
+
+    /// @a FINAL_V1
+    template<unsigned int och_inst, unsigned int och_id, unsigned int otd_id>
+      requires requires {
+        och_inst < ref::inst_num;
+        och_id < ref::ch_num;
+      }
+    TransferDescriptor &operator = (const TransferDescriptor<och_inst, och_id, otd_id> &other) {
+      set_config(other);
+      return *this;
+    }
+
+    /// @b FINAL_V1
     void set_length(const uint32_t &length, const bool &in_bytes) {
       _descPtr_->BTCTRL.bit.VALID = 0;
       uintptr_t s_addr = _descPtr_->SRCADDR.reg - detail::addr_mod(*_descPtr_, true);
@@ -342,7 +262,7 @@ namespace sioc::dma {
       detail::update_valid(*_descPtr_);
     }
 
-    /// @b TESTED_V1
+    /// @b FINAL_V1
     uint32_t length(const bool &in_bytes) const {
       uint32_t length = _descPtr_->BTCNT.reg;
       if (in_bytes) {
@@ -351,88 +271,54 @@ namespace sioc::dma {
       return length;
     }
 
-    /// @b COMPLETE_V2
-    inline TransferDescriptor *linked_descriptor() const {
-      return next;
+    /// @a TOOD
+    bool is_assigned() const {
+      return remove_fn;
     }
 
-    /// @b COMPLETE_V2
-    inline auto assigned_channel() const {
-      return std::make_pair(assig.inst, assig.id);
+    /// @a TODO
+    void unlink() {
+      
     }
 
-    /// @b COMPLETE_V2
-    inline ~TransferDescriptor() {
-      unlink();
-    }
+    protected:
+      friend struct Channel;
+      friend struct BasePeripheral;
+      using remove_t = void (*)(TransferDescriptor&);
 
-    DmacDescriptor *_descPtr_{&_desc_};
-    DmacDescriptor _desc_{};
-    void (*remove_fn)(TransferDescriptor*);
-    TransferDescriptor *next{nullptr};
+      static inline DmacDescriptor *_descPtr_{&_desc_};
+      static inline DmacDescriptor _desc_{};
+      static inline TransferDescriptor *next{nullptr};
   };
 
 
-  
+
+
+
+  template<unsigned int inst>
+    requires (inst < ref::inst_num)
   struct BasePeripheral
   {
-
-    /// @a FINAL
-    explicit BasePeripheral(const int &inst_num) {
-      if (inst_num >= 0 && inst_num < ref::inst_num && !bp_arr[inst_num]) {
-        bp_arr[inst_num] == this;
-        inst = inst_num;
-      }
-    }
-
-    ///@a FINAL
-    explicit BasePeripheral(BasePeripheral &&other) {
-      if (&other != this) {
-        if (!other.invalid()) {
-          bp_arr[other.inst] = this;
-        }
-        inst = std::exchange(other.inst, -1);
-      }
-    } 
-
-    /// @a FINAL
-    BasePeripheral &operator = (const BasePeripheral &other) {
-      set_config(other);      
-    }
-
-    /// @a FINAL
-    BasePeripheral &operator = (BasePeripheral &&other) {
-      if (&other != this) {
-        if (!other.invalid()) {
-          bp_arr[other.inst] = this;
-        }
-        if (!invalid()) {
-          bp_arr[inst] = &other;
-        }
-        std::swap(inst, other.inst);
-      }
-      return *this;
-    }    
-
-     /// @a FINAL
-    void init() {
-      if (invalid() || is_init()) { return; }
+    
+    /// @a FINAL_V1
+    static void init() {
+      if (is_init()) { return; }
       exit();
       // Enable all irq interrupts
-      int irq_off = ref::irq_array.size() * inst;
+      constexpr int irq_off = ref::irq_array.size() * inst;
       for (int i = 0; i < ref::irq_array.size(); i++) {
         NVIC_EnableIRQ(static_cast<IRQn_Type>(irq_off + ref::irq_array[i]));
       }
       // Set base/writeback mem sections & enable dma/clock
-      DMAC[inst].BASEADDR.reg = reinterpret_cast<uintptr_t>(bdesc);
-      DMAC[inst].WRBADDR.reg = reinterpret_cast<uintptr_t>(wbdesc);
+      DMAC[inst].BASEADDR.reg = reinterpret_cast<uintptr_t>(info.bdesc);
+      DMAC[inst].WRBADDR.reg = reinterpret_cast<uintptr_t>(info.wbdesc);
       MCLK->AHBMASK.reg |= (1 << (DMAC_CLK_AHB_ID + inst));
       DMAC[inst].CTRL.bit.DMAENABLE = 1;
     }
 
-    /// @a FINAL
-    void exit() {
-      if (invalid() || !is_init()) { return; }
+    /// @a FINAL_V1
+    static void exit() {
+      if (!is_init()) { return; }
       // Disable dma/ahbbus & reset all registers
       DMAC[inst].CTRL.bit.DMAENABLE = 0;
       while(DMAC[inst].CTRL.bit.DMAENABLE);
@@ -441,27 +327,30 @@ namespace sioc::dma {
       MCLK->AHBMASK.reg &= ~(1 << (MCLK_AHBMASK_DMAC_Pos + inst));
 
       // Disable & reset all irq interrupts
-      int irq_off = ref::irq_array.size() * inst;
+      constexpr int irq_off = ref::irq_array.size() * inst;
       for (int i = 0; i < ref::irq_array.size(); i++) {
         auto curr_irq = static_cast<IRQn_Type>(ref::irq_array[i] + irq_off);
         NVIC_DisableIRQ(curr_irq);
         NVIC_ClearPendingIRQ(curr_irq);
         NVIC_SetPriority(curr_irq, ref::def_irq_prio);
       }
-      // Reset fields
-      memset(const_cast<DmacDescriptor*>(wbdesc), 0U, sizeof(wbdesc));
-      memset(bdesc, 0U, sizeof(bdesc));
-
+      // Reset resources
+      memset(const_cast<DmacDescriptor*>(info.wbdesc), 0U, sizeof(info.wbdesc));
+      memset(info.bdesc, 0U, sizeof(info.bdesc));
     }
 
-    /// @a FINAL
-    inline bool is_init() const {
-      if (invalid()) { return false; }
-      auto b_addr = reinterpret_cast<uintptr_t>(bdesc); 
+    /// @a FINAL_V1
+    static inline bool is_init() const {
+      auto b_addr = reinterpret_cast<uintptr_t>(info.bdesc); 
       return DMAC[inst].CTRL.bit.DMAENABLE && DMAC[inst].BASEADDR.reg == b_addr;
     }
 
-    /// @a FINAL
+    /// @a FINAL_V1
+    operator bool() const { 
+      return is_init(); 
+    }
+
+    /// @a FINAL_V1
     struct Config
     {
       std::array<int32_t, DMAC_LVL_NUM> prilvl_en{-1, -1, -1, -1};             // Priority lvl enabled
@@ -470,10 +359,10 @@ namespace sioc::dma {
       std::array<int32_t, ref::irq_array.size()> irq_prio{-1, -1, -1, -1, -1}; // Irq priority lvl
     };
 
-    /// @a FINAL
+    /// @a FINAL_V1
     template<Config cfg>
-    void set_config() {
-      if (invalid() || !is_init()) { return; } // #WARN
+    static void set_config() {
+      if (!is_init()) { return; } // #WARN
       using namespace ref;
 
       // Compute reg values for irq priority
@@ -564,15 +453,18 @@ namespace sioc::dma {
       DMAC[inst].CTRL.reg |= set_ctrl;
     }
 
-    void set_config(const BasePeripheral &other) {
-      if (invalid() || other.invalid() || &other == this) [[unlikely]] { return; }
+    /// @a FINAL_V1
+    template<unsigned int other_inst>
+      requires (other_inst < ref::inst_num)
+    static void set_config(const BasePeripheral<other_inst> &other) {
+      if (&other == this) [[unlikely]] { return; }
       // Copy config from registers
-      DMAC[inst].CTRL.vec.LVLEN = DMAC[other.inst].CTRL.vec.LVLEN;
-      DMAC[inst].PRICTRL0.reg = DMAC[other.inst].PRICTRL0.reg;
+      DMAC[inst].CTRL.vec.LVLEN = DMAC[other_inst].CTRL.vec.LVLEN;
+      DMAC[inst].PRICTRL0.reg = DMAC[other_inst].PRICTRL0.reg;
 
       // Copy/set irq priority level config
-      unsigned int t_irq_off = ref::irq_array.size() * inst;
-      unsigned int o_irq_off = ref::irq_array.size() * other.inst;
+      constexpr int t_irq_off = ref::irq_array.size() * inst;
+      constexpr int o_irq_off = ref::irq_array.size() * other_inst;
 
       for (int i = 0; i < ref::irq_array.size(); i++) {
         auto other_prio = NVIC_GetPriority(static_cast<IRQn_Type>(ref::irq_array[i] + o_irq_off));
@@ -580,41 +472,40 @@ namespace sioc::dma {
       }
     }
 
-    unsigned int active_channel_count() const {
-      unsigned int count{0};
-      for (int i = 0; i < ref::ch_num; i++) {
-        if (DMAC[inst].Channel[i].CHSTATUS.bit.BUSY && Channel<3>)
+    /// @a FINAL_V1
+    template<unsigned int other_inst>
+      requires (other_inst < ref::inst_num)
+    BasePeripheral &operator = (const BasePeripheral<other_inst> &other) {
+      set_config<other_inst>(other);
+    }
 
-      }
-
-    }    
-
-
-
-
-    protected:
-      friend Channel;
-
-      int inst{-1};
-      DmacDescriptor bdesc[ref::ch_num]{};
-      volatile DmacDescriptor wbdesc[ref::ch_num]{};
-
-      std::array<Channel*, ref::ch_num> ch_arr{nullptr};
-      static inline std::array<BasePeripheral*, ref::inst_num> bp_arr{nullptr};
-
-      bool invalid() const {
-        return inst < 0 || inst >= ref::inst_num;
-      }
+    protected:     
+      static inline DmacDescriptor bdesc[ref::ch_num]{};
+      static inline volatile DmacDescriptor wbdesc[ref::ch_num]{};
   };
 
 
+  
 
 
-  struct Channel
+
+
+
+
+
+  /// @a TODO
+  template<unsigned int inst, unsigned int id>
+    requires requires {
+      inst < ref::inst_num;
+      id < ref::ch_num;
+    }
+  struct Channel : BasePeripheral<>
   {
 
-    /// @a COMPLETE_V2
-    Channel() = default;
+    /// @a FINAL
+    Channel() {
+      
+    }
 
     /// @a COMPLETE_V2
     template<unsigned int other_inst, unsigned int other_id>
@@ -1276,40 +1167,336 @@ namespace sioc::dma {
 
     void test() {
       memcpy(bdesc[id], 0U, detail::_dsize_);
-
     }
 
     protected:
-      friend BasePeripheral;
-      BasePeripheral &bp;
-      callback_t cbarr{nullptr};
-      TransferDescriptor *btd{nullptr};
-      volatile bool suspf[ref::ch_num]{false};
-  };
+      static inline TransferDescriptor *btd{nullptr};
+  }; 
 
 
 
-  /// @b TODO
-  uint32_t free_channel_count() {
-    uint32_t count = 0;
-    for (uint32_t i = 0; i < ref::inst_num; i++) {
-      count += ref::max_ch - std::popcount(detail::InstCommon[i].ch_msk);
-    }
-    return count;
-  } 
-
-  /// @b COMPLETE_V1
-  consteval std::pair<int32_t, int32_t> alloc_channel() {
-    constexpr uint32_t cnt = __COUNTER__;
-    if constexpr (cnt / ref::max_ch < ref::inst_num) {
-      return std::make_pair(cnt / ref::max_ch, cnt % ref::max_ch);
-    } 
-    return std::make_pair(-1, -1); // > Alloc fail
-  } 
 
 
 
+
+}
+
+  // struct TransferDescriptor
+  // {
     
+  //   /// @b COMPLETE_V2
+  //   TransferDescriptor() = default;
+
+  //   /// @b COMPLETE_V2
+  //   TransferDescriptor(const TransferDescriptor &other) {
+  //     this->operator = (other);
+  //   }
+
+  //   /// @b COMPLETE_V1
+  //   TransferDescriptor(TransferDescriptor &&other) {
+  //     this->operator = (std::move(other));
+  //   }
+
+  //   /// @b TESTED_V1
+  //   TransferDescriptor &operator = (const TransferDescriptor &other) {
+  //     if (&other != this) {
+  //       auto l_addr = _descPtr_->DESCADDR.reg;
+  //       memcpy(_descPtr_, other._descPtr_, detail::_dsize_);
+  //       _descPtr_->DESCADDR.reg = l_addr;
+  //     }
+  //     return *this;
+  //   }
+
+  //   /// @b TODO
+  //   TransferDescriptor &operator = (TransferDescriptor &&other) {
+  //     if (&other != this) {
+  //       auto crit = detail::SuspendSection(other.assig.inst, other.assig.id);
+  //       //unlink(); 
+  //       // Get other's descriptor or ptr (if base only)
+  //       if (other._descPtr_ != &other._desc_) {
+  //         _descPtr_ = std::exchange(other._descPtr_, &other._desc_);
+  //       } else {
+  //         memcpy(&_desc_, &other._desc_, detail::_dsize_);
+  //       }
+  //       // Relink prev/writeback if other is linked
+  //       if (other.assig.inst != -1 && other.assig.id != -1) {
+  //         auto &comm = detail::InstCommon[other.assig.inst];
+  //         TransferDescriptor *prev = comm.btd[other.assig.id];
+  //         do {
+  //           if (prev->next == &other) {
+  //             auto l_addr = reinterpret_cast<uintptr_t>(_descPtr_); 
+  //             if (comm.wbdesc[other.assig.id].DESCADDR.reg == 
+  //                 prev->_descPtr_->DESCADDR.reg) {
+  //               comm.wbdesc[other.assig.id].DESCADDR.reg = l_addr;
+  //             }
+  //             prev->_descPtr_->DESCADDR.reg = l_addr;
+  //             prev->next = this;
+  //           }
+  //         } while(prev && prev != comm.btd[other.assig.id]);
+  //         if (_descPtr_ != &_desc_) {
+  //           comm.btd[other.assig.id] = this;
+  //         }
+  //       } // Exchange fields
+  //       next = std::exchange(other.next, nullptr);
+  //       assig.inst = std::exchange(other.assig.inst, -1);
+  //       assig.id = std::exchange(other.assig.id, -1);
+  //     }
+  //     return *this;
+  //   }
+
+  //   /// @b TESTED_V1
+  //   void swap(TransferDescriptor &other, const bool &swap_descriptors = true) {
+  //     if (&other != this) {
+  //       auto crit_o = detail::SuspendSection(other.assig.inst, other.assig.id);
+  //       auto crit_t = detail::SuspendSection(assig.inst, assig.id);
+
+  //       if (swap_descriptors) { // Swap descriptors or ptrs (if base only)
+  //         DmacDescriptor *this_ptr{_descPtr_}; 
+  //         DmacDescriptor this_desc{};
+  //         memcpy(&this_desc, _descPtr_, detail::_dsize_);
+
+  //         if (other._descPtr_ != &other._desc_) {
+  //           _descPtr_ = other._descPtr_;
+  //         } else {
+  //           memcpy(&_desc_, &other._desc_, detail::_dsize_);
+  //           _descPtr_ = &_desc_;
+  //         }
+  //         if (this_ptr != &_desc_) {
+  //           other._descPtr_ = this_ptr;
+  //         } else {
+  //           memcpy(&other._desc_, &this_desc, detail::_dsize_);
+  //           other._descPtr_ = &other._desc_;
+  //         }
+  //       } else { // If this/other = base -> move this/other into & out of base mem
+  //         if (other._descPtr_ != &other._desc_ && _descPtr_ != &_desc_) {
+  //           DmacDescriptor this_temp{};
+  //           memcpy(&this_temp, _descPtr_, detail::_dsize_);
+  //           memcpy(_descPtr_, other._descPtr_, detail::_dsize_);
+  //           memcpy(other._descPtr_, &this_temp, detail::_dsize_);
+
+  //         } else if (other._descPtr_ != &other._desc_) {
+  //           memcpy(&other._desc_, other._descPtr_, detail::_dsize_);
+  //           memcpy(&other._descPtr_, &_desc_, detail::_dsize_);
+  //           _descPtr_ = std::exchange(other._descPtr_, &other._desc_);
+          
+  //         } else if (_descPtr_ != &_desc_) {
+  //           memcpy(&_desc_, _descPtr_, detail::_dsize_);
+  //           memcpy(_descPtr_, &other._desc_, detail::_dsize_);
+  //           other._descPtr_ = std::exchange(_descPtr_, &_desc_);
+  //         }
+  //         std::swap(_descPtr_->DESCADDR.reg, other._descPtr_->DESCADDR.reg);
+  //       }
+  //       // Relink other's prev -> this & this prev -> other
+  //       auto relink_prev = [&](TransferDescriptor &old, TransferDescriptor &targ) {
+  //         if (old.assig.inst != -1 && old.assig.id != -1) {
+  //           auto &comm = detail::InstCommon[old.assig.inst];
+  //           auto wb = const_cast<DmacDescriptor*>(&comm.wbdesc[targ.assig.id]);
+  //           TransferDescriptor *prev = comm.btd[old.assig.id];
+  //           do {
+  //             if (prev->next == &old) {
+  //               auto new_addr = reinterpret_cast<uintptr_t>(targ._descPtr_);
+  //               if (wb->DESCADDR.reg == prev->_descPtr_->DESCADDR.reg) {
+  //                 comm.wbdesc[targ.assig.id].DESCADDR.reg = new_addr;
+  //               }
+  //               prev->_descPtr_->DESCADDR.reg = new_addr;
+  //               prev->next = &targ;
+  //             }
+  //             prev = prev->next;
+  //           } while(prev && prev != comm.btd[old.assig.id]);
+  //         }
+  //       };
+  //       relink_prev(other, *this);
+  //       relink_prev(*this, other);
+
+  //       // Reassign base td & swap fields
+  //       if (_descPtr_ != &_desc_) {
+  //         detail::InstCommon[other.assig.inst].btd[other.assig.id] = this;
+  //       }
+  //       if (other._descPtr_ != &other._desc_) {
+  //         detail::InstCommon[assig.inst].btd[assig.id] = &other;
+  //       }
+  //       std::swap(assig, other.assig);
+  //       std::swap(next, other.next);
+  //       detail::update_valid(*_descPtr_);
+  //       detail::update_valid(*other._descPtr_);
+  //     }
+  //   }
+
+  //   /// @b TESTED_V2
+  //   template<typename src_t = detail::dumm_t, 
+  //            typename dst_t = detail::dumm_t>
+  //   struct Config 
+  //   {
+  //     uint32_t beatsize   = -1; // > numeric
+  //     src_t *src          = &detail::dummy_loc; // > ptr
+  //     int32_t srcinc      = -1; // > numeric
+  //     dst_t *dst          = &detail::dummy_loc; // > ptr
+  //     int32_t dstinc      = -1; // > numeric
+  //     blockact_t blockact = blockact_t::null;
+  //   };
+
+  //   /// @b TESTED_V2
+  //   template<Config cfg>
+  //   void set_config() {
+  //     using namespace ref;
+  //     _descPtr_->BTCTRL.bit.VALID = 0;
+  //     auto prev_bs = beatsize_map[_descPtr_->BTCTRL.bit.BEATSIZE];
+  //     uintptr_t prev_srcaddr{0}, prev_dstaddr{0};
+
+  //     // Capture previous, non-modified address if beatsize changed
+  //     if (cfg.beatsize != -1 && prev_bs != cfg.beatsize) {
+  //       if constexpr (std::is_same_v<std::remove_pointer_t<decltype(cfg.src)>, detail::dumm_t>) {
+  //         prev_srcaddr = _descPtr_->SRCADDR.reg - detail::addr_mod(*_descPtr_, true);
+  //       }
+  //       if constexpr (std::is_same_v<std::remove_pointer_t<decltype(cfg.dst)>, detail::dumm_t>) {
+  //         prev_dstaddr = _descPtr_->DSTADDR.reg - detail::addr_mod(*_descPtr_, false);
+  //       }
+  //     }
+  //     // Compute ctrl register mask
+  //     constexpr auto btctrl_masks = [&]() consteval {
+  //       using ctrl_t = decltype(std::declval<DMAC_BTCTRL_Type>().reg);        
+  //       ctrl_t clr_msk{0}, set_msk{0};
+
+  //       if constexpr (cfg.beatsize != -1) {
+  //         constexpr uint32_t bs_reg = std::distance(beatsize_map.begin(), 
+  //             std::find(beatsize_map.begin(), beatsize_map.end(), cfg.beatsize));  
+  //         static_assert(bs_reg < beatsize_map.size(), err_desc_cfg_invalid);
+
+  //         clr_msk |= (DMAC_BTCTRL_BEATSIZE_Msk);
+  //         set_msk |= (bs_reg << DMAC_BTCTRL_BEATSIZE_Pos);
+  //       }
+  //       if constexpr (std::max(cfg.srcinc, cfg.dstinc) > 1) {
+  //         constexpr uint32_t ssize_r = std::distance(stepsize_map.begin(), std::find
+  //             (stepsize_map.begin(), stepsize_map.end(), std::max(cfg.srcinc, cfg.dstinc)));
+  //         static_assert(ssize_r < stepsize_map.size(), err_desc_cfg_invalid);
+
+  //         clr_msk |= (DMAC_BTCTRL_STEPSIZE_Msk);
+  //         set_msk |= (ssize_r << DMAC_BTCTRL_STEPSIZE_Pos);
+  //       }
+  //       if constexpr (cfg.srcinc != -1) {
+  //         clr_msk |= (DMAC_BTCTRL_SRCINC);
+  //         set_msk |= (static_cast<bool>(cfg.srcinc) << DMAC_BTCTRL_SRCINC_Pos);
+  //       }
+  //       if constexpr (cfg.dstinc != -1) {
+  //         clr_msk |= (DMAC_BTCTRL_DSTINC);
+  //         set_msk |= (static_cast<bool>(cfg.dstinc) << DMAC_BTCTRL_DSTINC_Pos);
+  //       }
+  //       if constexpr (cfg.srcinc > 1) {
+  //         static_assert(cfg.dstinc <= 1, err_desc_cfg_invalid); 
+  //         clr_msk |= (DMAC_BTCTRL_STEPSEL);
+  //         set_msk |= (DMAC_BTCTRL_STEPSEL_SRC);
+  //       }
+  //       if constexpr (cfg.dstinc > 1) {
+  //         static_assert(cfg.srcinc <= 1, err_desc_cfg_invalid);
+  //         clr_msk |= (DMAC_BTCTRL_STEPSEL);
+  //         set_msk |= (DMAC_BTCTRL_STEPSEL_DST);
+  //       }
+  //       if constexpr (cfg.blockact != blockact_t::null) {
+  //         clr_msk |= (DMAC_BTCTRL_BLOCKACT_Msk);
+  //         set_msk |= (static_cast<ctrl_t>(cfg.blockact) << DMAC_BTCTRL_BLOCKACT_Pos);
+  //       }
+  //       return std::pair(clr_msk, set_msk); 
+  //     }();
+  //     _descPtr_->BTCTRL.reg &= ~btctrl_masks.first; 
+  //     _descPtr_->BTCTRL.reg |= btctrl_masks.second;
+
+  //     // Set source address or re-calc previous if beatsize changed
+  //     if constexpr (!std::is_same_v<std::remove_pointer_t<decltype(cfg.src)>, detail::dumm_t>) {
+  //       _descPtr_->SRCADDR.reg = cfg.src ? (uintptr_t)cfg.src 
+  //           + detail::addr_mod(*_descPtr_, true) : 0;
+  //     } else if (cfg.beatsize != -1 && prev_bs != cfg.beatsize) {
+  //       _descPtr_->SRCADDR.reg = prev_srcaddr + detail::addr_mod(*_descPtr_, true);
+  //     }
+  //     // Set destination address or re-calc prev if beatsize changedd
+  //     if constexpr (!std::is_same_v<std::remove_pointer_t<decltype(cfg.dst)>, detail::dumm_t>) {
+  //       _descPtr_->DSTADDR.reg = cfg.dst ? (uintptr_t)cfg.dst 
+  //           + detail::addr_mod(*_descPtr_, false) : 0;
+  //     } else if (cfg.beatsize != -1 && prev_bs != cfg.beatsize) {
+  //       _descPtr_->DSTADDR.reg = prev_dstaddr + detail::addr_mod(*_descPtr_, false);
+  //     }
+  //     detail::update_valid(*_descPtr_);
+  //   }
+
+  //   /// @b TESTED_V1
+  //   void set_length(const uint32_t &length, const bool &in_bytes) {
+  //     _descPtr_->BTCTRL.bit.VALID = 0;
+  //     uintptr_t s_addr = _descPtr_->SRCADDR.reg - detail::addr_mod(*_descPtr_, true);
+  //     uintptr_t d_addr = _descPtr_->DSTADDR.reg - detail::addr_mod(*_descPtr_, false);
+
+  //     uint32_t cnt_reg = length;
+  //     if (in_bytes && length) {
+  //       uint32_t bs_val = ref::beatsize_map[_descPtr_->BTCTRL.bit.BEATSIZE];
+  //       if (length % bs_val) { /* #WARN */ }
+  //       cnt_reg /= bs_val;
+  //     }
+  //     // Set new beatcount & re-calc src/dst (mod changes w/ cnt)
+  //     _descPtr_->BTCNT.reg = cnt_reg;
+  //     _descPtr_->SRCADDR.reg = s_addr + detail::addr_mod(*_descPtr_, true);
+  //     _descPtr_->DSTADDR.reg = d_addr + detail::addr_mod(*_descPtr_, false);
+  //     detail::update_valid(*_descPtr_);
+  //   }
+
+  //   /// @b TESTED_V1
+  //   uint32_t length(const bool &in_bytes) const {
+  //     uint32_t length = _descPtr_->BTCNT.reg;
+  //     if (in_bytes) {
+  //       length /= ref::beatsize_map[_descPtr_->BTCTRL.bit.BEATSIZE];
+  //     }
+  //     return length;
+  //   }
+
+  //   /// @b COMPLETE_V2
+  //   inline TransferDescriptor *linked_descriptor() const {
+  //     return next;
+  //   }
+
+  //   /// @b COMPLETE_V2
+  //   inline auto assigned_channel() const {
+  //     return std::make_pair(assig.inst, assig.id);
+  //   }
+
+  //   /// @b COMPLETE_V2
+  //   inline ~TransferDescriptor() {
+  //     unlink();
+  //   }
+
+  //   DmacDescriptor *_descPtr_{&_desc_};
+  //   DmacDescriptor _desc_{};
+  //   void (*remove_fn)(TransferDescriptor*);
+  //   TransferDescriptor *next{nullptr};
+  // };
+
+
+  
+
+
+
+
+
+
+
+//   /// @b TODO
+//   uint32_t free_channel_count() {
+//     uint32_t count = 0;
+//     for (uint32_t i = 0; i < ref::inst_num; i++) {
+//       count += ref::max_ch - std::popcount(detail::InstCommon[i].ch_msk);
+//     }
+//     return count;
+//   } 
+
+//   /// @b COMPLETE_V1
+//   consteval std::pair<int32_t, int32_t> alloc_channel() {
+//     constexpr uint32_t cnt = __COUNTER__;
+//     if constexpr (cnt / ref::max_ch < ref::inst_num) {
+//       return std::make_pair(cnt / ref::max_ch, cnt % ref::max_ch);
+//     } 
+//     return std::make_pair(-1, -1); // > Alloc fail
+//   } 
+
+
+
+
+   
 
   /// @b COMPLETE_V2
   template<uint32_t inst>
@@ -1346,16 +1533,18 @@ namespace sioc::dma {
       if (comm.cbarr[id] && cbf != callback_flag_t::null) {
         comm.cbarr[id](id, cbf);
       }
-    } 
+    }
+    static inline std::vector<callback_t> cb_ptr_vec;
+    volatile static inline std::vector<bool> suspf_vec;
   }
 
-} // END OF NAMESPACE SIOC::DMA
+// } // END OF NAMESPACE SIOC::DMA
 
-/// @b TODO->MOVE_OUT_OF_FILE
-void DMAC_0_Handler() { sioc::dma::master_irq<0>(); }
-void DMAC_1_Handler() { sioc::dma::master_irq<0>(); }
-void DMAC_2_Handler() { sioc::dma::master_irq<0>(); }
-void DMAC_3_Handler() { sioc::dma::master_irq<0>(); }
-void DMAC_4_Handler() { sioc::dma::master_irq<0>(); }
+// /// @b TODO->MOVE_OUT_OF_FILE
+// void DMAC_0_Handler() { sioc::dma::master_irq<0>(); }
+// void DMAC_1_Handler() { sioc::dma::master_irq<0>(); }
+// void DMAC_2_Handler() { sioc::dma::master_irq<0>(); }
+// void DMAC_3_Handler() { sioc::dma::master_irq<0>(); }
+// void DMAC_4_Handler() { sioc::dma::master_irq<0>(); }
 
 

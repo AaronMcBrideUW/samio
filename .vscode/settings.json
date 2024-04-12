@@ -63,7 +63,8 @@
     "any": "cpp",
     "semaphore": "cpp",
     "stop_token": "cpp",
-    "cstring": "cpp"
+    "cstring": "cpp",
+    "map": "cpp"
   },
   "C_Cpp.errorSquiggles": "enabled"
 }
