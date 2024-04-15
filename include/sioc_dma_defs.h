@@ -17,14 +17,22 @@
 #include <sam.h>
 #include <inttypes.h>
 #include <array>
+#include <functional>
 
-namespace sioc::dma {
-  
+namespace sioc::dma 
+{
+
   enum class channel_state_t {
     null      = 0,
     disabled  = 1,
     suspended = 2,
     enabled  = 3,
+  };
+
+  enum class periph_state_t {
+    null = 0,
+    exit = 1,
+    init = 2,
   };
 
   /// @brief Denotes the reason that an interrupt was triggered.
@@ -145,7 +153,7 @@ namespace sioc::dma {
   };
 
 
-  typedef void (*callback_t)(const uint32_t&, const callback_flag_t&);
+  using callback_t = std::function<void(const unsigned int&, const callback_flag_t&)>;
   using length_t = decltype(std::declval<DmacDescriptor>().BTCNT.reg);
 
 

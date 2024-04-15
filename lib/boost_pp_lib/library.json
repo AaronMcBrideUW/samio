@@ -1,0 +1,8 @@
+{
+  "name": "boost_pp",
+  "build": {
+    "sourceDir": "." 
+  }
+
+
+}
