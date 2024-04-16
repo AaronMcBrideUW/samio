@@ -29,11 +29,9 @@ namespace sioc::temp {
   /// @a FINAL_V1
   template<std::integral N, std::integral D>
     requires (std::is_nothrow_convertible_v<N, D>)
-  N div_ceil(const N &numerator, const D &denominator) {
+  std::common_type_t<N, D> div_ceil(const N &numerator, const D &denominator) {
     div_t div_result = div(numerator, denominator);
     return div_result.quot + div_result.rem;
   } 
-
-
 
 } 

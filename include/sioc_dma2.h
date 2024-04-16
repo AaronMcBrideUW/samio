@@ -20,7 +20,7 @@ namespace sioc::dma
 
   struct TransferDescriptor;  
   struct Peripheral;
-  struct Channel;
+  struct Peripheral::Channel;
 
   namespace detail 
   {
@@ -116,6 +116,8 @@ namespace sioc::dma
   // }
 
   }
+
+
 
 
   /// @a FINAL_V2
@@ -428,10 +430,12 @@ namespace sioc::dma
   template<typename T>
   concept valid_loc_t = requires {
     std::is_trivially_copyable_v<std::conditional_t
-        <std::is_same_v<T, detail::dumm_t>, int, T>>;
+        <std::is_same_v<T, detail::dummy_t>, int, T>>;
     !std::is_void_v<T>;
     !std::is_pointer_v<T>;
   };
+
+
 
 
 
@@ -635,642 +639,652 @@ namespace sioc::dma
     /// @a TODO
     void pending_channel_count() {
 
-    } 
-
-    /// @a FINAL_V2
-    const unsigned int inst_num;
-    DmacDescriptor bdesc[ref::ch_num]{};
-    volatile DmacDescriptor wbdesc[ref::ch_num]{};
-  };
-
-
-
-
-  /// FINAL_V2
-  struct Channel 
-  {
-
-    /// @a FINAL_V2
-    Channel(Peripheral &periph, const unsigned int &ch_id)
-      : periph(periph), ch_id(ch_id) {}
-
-    /// @a FINAL_V2
-    Channel(const Channel&) = delete;
-    Channel(Channel&&) = delete;
-    ~Channel() = delete;
-
-    /// @a FINAL_V2
-    struct TransferConfig
-    {
-      const int32_t burstlen   = -1; // > Numeric 
-      const trigsrc_t trigsrc  = trigsrc_t::null;
-      const trigact_t trigact  = trigact_t::null;
-      const int32_t prilvl     = -1; 
-      const int32_t threshold  = -1; // > Numeric
-      const int32_t runstdby   = -1; // > Boolean cond
-    };
-
-    /// @a FINAL_V2
-    template<TransferConfig &cfg>
-    void set_transfer_config() {
-      using namespace ref;
-
-      // Record enable status & disable channel
-      bool prev_en = DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE;
-      DMAC[periph.inst_num].Channel[id].CHCTRLA.bit.ENABLE = 0;
-      while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE);
-
-      // Compute masks for config in ctrl register
-      constexpr auto chctrl_masks = [&]() consteval {
-        using ctrl_t = decltype(std::declval<DMAC_CHCTRLA_Type>().reg);
-        ctrl_t clr_msk{0}, set_msk{0};
-
-        if constexpr (cfg.burstlen != -1) {
-          constexpr uint32_t bl_reg = std::distance(burstlen_map.begin(),
-              std::find(burstlen_map.begin(), burstlen_map.end(), cfg.burstlen));
-          static_assert(bl_reg < burstlen_map.size(), 
-              "SIO ERROR (DMA): channel burstlen config invalid.");
-
-          clr_msk |= (DMAC_CHCTRLA_BURSTLEN_Msk);
-          set_msk |= (bl_reg << DMAC_CHCTRLA_BURSTLEN_Pos);
-        }
-        if constexpr (cfg.threshold != -1) {
-          constexpr uint32_t th_reg = std::distance(threshold_map.begin(),
-              std::find(threshold_map.begin(), threshold_map.end(), cfg.threshold));
-          static_assert(th_reg < threshold_map.size(), 
-              "SIO ERROR (DMA): channel threshold config invalid.");
-
-          clr_msk |= (DMAC_CHCTRLA_THRESHOLD_Msk);
-          set_msk |= (th_reg << DMAC_CHCTRLA_THRESHOLD_Pos);
-        }
-        if constexpr (cfg.trigsrc != trigsrc_t::null) {
-          clr_msk |= (DMAC_CHCTRLA_TRIGSRC_Msk);
-          set_msk |= (static_cast<uint32_t>(cfg.trigsrc) << DMAC_CHCTRLA_TRIGSRC_Pos);
-        }
-        if constexpr (cfg.trigact != trigact_t::null) {
-          clr_msk |= (DMAC_CHCTRLA_TRIGACT_Msk);
-          set_msk |= (static_cast<uint32_t>(cfg.trigact) << DMAC_CHCTRLA_TRIGACT_Pos);
-        }
-        if constexpr (cfg.runstdby != -1) {
-          static_assert(cfg.runstdby == 0 || cfg.runstdby == 1, 
-              "SIO ERROR (DMA): channel runstdby config invalid");
-          clr_msk |= (DMAC_CHCTRLA_RUNSTDBY);
-          set_msk |= (static_cast<bool>(cfg.runstdby) << DMAC_CHCTRLA_RUNSTDBY_Pos);
-        }
-        return std::make_pair(clr_msk, set_msk);
-      }(); 
-      DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.reg &= ~chctrl_masks.first; 
-      DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.reg |= chctrl_masks.second; 
-
-      // Compute masks for config in prictrl register & set them
-      constexpr auto chprilvl_masks = [&]() consteval {
-        using prictrl_t = decltype(std::declval<DMAC_PRICTRL0_Type>().reg);
-        prictrl_t clr_msk{0}, set_msk{0};
-
-        if constexpr (cfg.prilvl != -1) {
-          constexpr uint32_t plvl_reg = std::distance(prilvl_map.begin(),
-              std::find(prilvl_map.begin(), prilvl_map.end(), cfg.prilvl));
-          static_assert(plvl_reg < prilvl_map.size(), 
-              "SIO ERROR (DMA): channel prilvl config invalid.");
-
-          clr_msk |= (DMAC_CHPRILVL_PRILVL_Msk);
-          set_msk |= (plvl_reg << DMAC_CHPRILVL_PRILVL_Pos);
-        }
-        return std::make_pair(clr_msk, set_msk);
-      }();
-      DMAC[periph.inst_num].Channel[ch_id].CHPRILVL.reg &= ~chprilvl_masks.first;
-      DMAC[periph.inst_num].Channel[ch_id].CHPRILVL.reg |= chprilvl_masks.second;
-      DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = prev_en; // > Re-enable channel 
     }
-
-    /// @a FINAL_V2
-    void set_transfer_config(const Channel &other) {
-      if (&other != this) {
-        // Capture enable state & disable channel
-        const bool prev_en = DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE;
-        DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = 0;
-        while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE);
-        
-        // Clear and set (with other) -> prilvl & ctrl registers
-        auto &o_inst = other.periph.inst_num;
-        DMAC[periph.inst_num].Channel[ch_id].CHPRILVL.reg = DMAC[o_inst].Channel[other.ch_id].CHPRILVL.reg;
-        DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.reg = (DMAC[o_inst].Channel[other.ch_id].CHCTRLA.reg 
-            & ~(DMAC_CHCTRLA_ENABLE | DMAC_CHCTRLA_SWRST));
-        DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = prev_en; // > Re-enable channel
-      }
-    }
-
-    /// @a FINAL_V2
-    struct InterruptConfig
-    {
-      const callback_t cb      = detail::dummy_cb; // > Callable (std::function - callback_t)
-      const int32_t susp_int   = -1; // > Boolean cond
-      const int32_t err_int    = -1; // > Boolean cond
-      const int32_t tcmpl_int  = -1; // > Boolean cond
-    };
-
-    /// @a FINAL_V2
-    template<InterruptConfig &cfg>
-    void set_interrupt_config() {
-      // Compute and set masks for interrupt cfg reg
-      constexpr auto chint_masks = [&]() consteval {
-        using inten_t = decltype(std::declval<DMAC_CHINTENSET_Type>().reg);
-        inten_t clr_msk{0}, set_msk{0};
-
-        if constexpr (cfg.susp_int != -1) {
-          static_assert(cfg.susp_int == 0 || cfg.susp_int == 1, 
-              "SIO ERROR (DMA): ch susp_int config invalid");
-          clr_msk |= (DMAC_CHINTENCLR_SUSP);
-          set_msk |= (static_cast<bool>(cfg.susp_int) << DMAC_CHINTENSET_SUSP_Pos);
-        }
-        if constexpr (cfg.err_int != -1) {
-          static_assert(cfg.err_int == 0 || cfg.err_int == 1, 
-              "SIO ERROR (DMA): ch err_int config invalid");
-          clr_msk |= (DMAC_CHINTENCLR_TERR);
-          set_msk |= (static_cast<bool>(cfg.err_int) << DMAC_CHINTENSET_TERR_Pos);
-        }
-        if constexpr (cfg.tcmpl_int != -1) {
-          static_assert(cfg.tcmpl_int == 0 || cfg.tcmpl_int == 1, 
-              "SIO ERROR (DMA): ch tcmpl_int config invalid");
-          clr_msk |= (DMAC_CHINTENCLR_TCMPL);
-          set_msk |= (static_cast<bool>(cfg.tcmpl_int) << DMAC_CHINTENSET_TCMPL_Pos);
-        }
-        return std::make_pair(clr_msk, set_msk);
-      }();
-      DMAC[periph.inst_num].Channel[ch_id].CHINTENSET.reg &= ~chint_masks.first;
-      DMAC[periph.inst_num].Channel[ch_id].CHINTENSET.reg |= chint_masks.second;
-      
-      // Register channel callback & callback function
-      if constexpr (cfg.cb != detail::dummy_cb) { 
-        callback = cfg.cb;
-      }
-    }
-
-    /// @a FINAL_V2
-    void set_interrupt_config(const Channel &other, const bool &copy_cb = true) {
-      if (&other != this) [[likely]] {
-        // Copy interrupt set register & callback
-        auto &o_chint = DMAC[other.periph.inst_num].Channel[other.ch_id].CHINTENSET.reg;
-        DMAC[periph.inst_num].Channel[ch_id].CHINTENSET.reg |= o_chint;
-        if (copy_cb) { callback = other.callback; }
-      }
-    }
-
-    /// @a FINAL_V2
-    Channel &operator = (const Channel &other) {
-      if (&other != this) [[likely]] {
-        set_transfer_config(other);
-        set_interrupt_config(other, true);
-      }
-      return *this;
-    }
-
-    /// @a FINAL_V2
-    void reset(const bool &clear_descriptors = true) {
-      if (clear_descriptors) [[likely]] { 
-        descriptor_list.clear(); 
-      }
-      DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = 0;     // Disable DMA channel
-      while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE);  // Wait for abort
-      DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.SWRST = 1;      // Software reset ch registers
-      while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.SWRST);   // Wait for sw reset
-      
-      auto wb_ptr = const_cast<DmacDescriptor*>(&periph.wbdesc[ch_id]);
-      auto b_ptr = &periph.bdesc[ch_id];
-
-      // Reset "fields" in common mem
-      memset(wb_ptr, 0U, detail::dsize); 
-      memset(b_ptr, 0U, detail::dsize);
-      callback = nullptr;
-      suspf = false;
-    }
-
-
-    /// @a FINAL_V2
-    bool set_state(const channel_state_t &targ_state) {
-      auto atomic = temp::atomic_section();
-      auto init_state = state();
-      if (targ_state != init_state) [[likely]] {
-
-        // Disable channel
-        if (targ_state == channel_state_t::disabled) [[unlikely]] {
-          DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = 0;
-          while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE);
-        
-        } else { // Enable/reset channel (if writeback invalid/end)
-          if (!periph.wbdesc[ch_id].BTCNT.reg && !periph.wbdesc[ch_id].DESCADDR.reg && 
-              init_state == channel_state_t::suspended) { 
-            DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = 0;
-            while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE);
-          }
-          DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = 1;
-        }
-        // Suspend channel
-        if (targ_state == channel_state_t::suspended) [[unlikely]] {
-          DMAC[periph.inst_num].Channel[ch_id].CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_SUSPEND_Val;
-          while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLB.bit.CMD == DMAC_CHCTRLB_CMD_SUSPEND_Val);
-          suspf = true;
-
-        // Resume channel (if susp ONLY) -> otherwise skip next susp
-        } else if (init_state == channel_state_t::suspended) {
-          DMAC[periph.inst_num].Channel[ch_id].CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_RESUME_Val;
-          DMAC[periph.inst_num].Channel[ch_id].CHINTFLAG.bit.SUSP = 1;
-          suspf = false;
-        }
-      }
-      return (targ_state == state());
-    }
-
-    /// @a FINAL_V2
-    inline channel_state_t state() {
-      if (!DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE) {
-        return channel_state_t::disabled;
-
-      } else if (DMAC[periph.inst_num].Channel[ch_id].CHINTFLAG.bit.SUSP || suspf) {
-        return channel_state_t::suspended;
-      }
-      return channel_state_t::enabled;
-    }
-
-    /// @a FINAL_V2
-    inline void trigger() {
-      using reg_t = decltype(std::declval<DMAC_SWTRIGCTRL_Type>().reg);
-      reg_t trig_msk = (1 << (ch_id + DMAC_SWTRIGCTRL_SWTRIG0_Pos)); 
-      DMAC[periph.inst_num].SWTRIGCTRL.reg |= trig_msk;
-    }
-
-    /// @a FINAL_V2
-    inline bool trigger_pending() const {
-      return DMAC[periph.inst_num].Channel[ch_id].CHSTATUS.bit.PEND;
-    }
-
-    /// @a FINAL_V2
-    inline bool transfer_busy() const {
-      return DMAC[periph.inst_num].Channel[ch_id].CHSTATUS.bit.BUSY &&
-          !(DMAC[periph.inst_num].Channel[ch_id].CHINTFLAG.bit.SUSP || suspf);
-    }
-
-
-    /// @a FINAL_V2
-    struct DescriptorList_t 
-    {
-
-      /// @a FINAL_V2
-      void clear() {
-        if (_super_.btd) [[likely]] { // Set channel state -> disabled
-          DMAC[_super_.periph.inst_num].Channel[_super_.ch_id].CHCTRLA.bit.ENABLE = 0;
-          while(DMAC[_super_.periph.inst_num].Channel[_super_.ch_id].CHCTRLA.bit.ENABLE);
-
-          // Return base descriptor to base td's owned memory
-          TransferDescriptor *curr = _super_.btd;
-          memcpy(&curr->desc, curr->descPtr, detail::dsize);
-          curr->descPtr = &curr->desc;
-
-          do { // Iter through & unlink/unassign descritors
-            curr->assig_ch = nullptr;
-            curr->descPtr->DESCADDR.reg = 0;
-            curr = std::exchange(curr->next, nullptr);
-          } while(curr && curr != _super_.btd);
-
-          // Clear state variables/writeback & disable channel
-          memset((void*)&_super_.periph.wbdesc[_super_.ch_id], 0U, detail::dsize);
-          memset(&_super_.periph.bdesc[_super_.ch_id], 0U, detail::dsize);
-          _super_.btd = nullptr;
-        }
-      }
-
-      /// @a FINAL_V2
-      template<TransferDescriptor&... tdlist, bool looped>
-      void set() {
-        if (sizeof...(tdlist)) [[likely]] {
-          Dmac &dma = DMAC[_super_.periph.inst_num];
-          bool prev_en = dma.Channel[_super_.ch_id].CHCTRLA.bit.ENABLE;
-          (tdlist.unlink(), ...);
-          clear();
-          // get first td & move desc to base memory
-          TransferDescriptor *base = ((tdlist, true) || ...);
-          memcpy(&_super_.periph.bdesc[_super_.ch_id], &base->desc, detail::dsize);
-          base->descPtr = &_super_.periph.bdesc[_super_.ch_id];
-          _super_.btd = base;
-
-          // Find initial previous descriptor (if looped -> last)
-          static constexpr detail::TdescResource dumm_rsrc{};
-          TransferDescriptor *prev{&dumm_rsrc};
-          if constexpr (looped) { prev = &(tdlist, ...); }
-
-          // Iterate (fold) through descriptors -> link together
-          ((prev->descPtr->DESCADDR.reg = reinterpret_cast
-                <uintptr_t>(tdlist.descPtr),
-            tdlist.assig_ch = &_super_,
-            prev->next = &tdlist,
-            prev = &tdlist
-          ), ...);
-          // Re-enable channel if disabled
-          dma.Channel[ch_id].CHCTRLA.bit.ENABLE = prev_en;
-        }
-      }
-
-      /// @a FINAL_V2
-      bool add(TransferDescriptor &td, const unsigned int &index) {
-        auto crit = detail::SuspendSection(&_super_);
-
-        // Get resources & unlink channel
-        TransferDescriptor *ori_base = _super_.btd;
-        TransferDescriptor *prev{ori_base};
-        td.unlink();
-
-        // Set as new base descriptor 
-        if (!_super_.btd || !index) {
-          if (_super_.btd) {
-            memcpy(&_super_.btd->desc, _super_.btd->descPtr, detail::dsize);
-            _super_.btd->descPtr = &_super_.btd->desc;
-
-            // Link td to prev base...
-            auto l_addr = reinterpret_cast<uintptr_t>(_super_.btd); 
-            td.descPtr->DESCADDR.reg = l_addr;
-            td.next = _super_.btd;
-          }
-          // Move td descriptor into base memory section
-          auto *base_desc = &_super_.periph.bdesc[_super_.ch_id];
-          memcpy(base_desc, &td.desc, detail::dsize);
-          td.descPtr = &td.desc;
-          _super_.btd = &td;
-
-          // If looped -> Find and relink last descriptor
-          while(prev->next && prev->next != ori_base) { prev = prev->next; }
-          if (prev->next == ori_base) {
-            auto l_addr = reinterpret_cast<uintptr_t>(base_desc);
-            prev->descPtr->DESCADDR.reg = l_addr;
-            prev->next = &td;
-          }
-        } else { // Get previous descriptor
-          for (int i = 0; i < index; i++) {
-            if (!prev->next || prev->next == ori_base) { break; }
-            prev = prev->next;
-          }
-          // Link td -> prev (old) next
-          td.descPtr->DESCADDR.reg = prev->descPtr->DESCADDR.reg;
-          td.next = prev->next;
-
-          // Link prev -> new td
-          auto l_addr = reinterpret_cast<uintptr_t>(td.descPtr);
-          prev->descPtr->DESCADDR.reg = l_addr;
-          prev->next = &td;
-        }
-        // Relink writeback descriptor
-        auto &wb = _super_.periph.wbdesc[_super_.ch_id];
-        if (wb.DESCADDR.reg == td.descPtr->DESCADDR.reg) {
-          auto l_addr = reinterpret_cast<uintptr_t>(td.descPtr);
-          wb.DESCADDR.reg = l_addr;
-        }
-        td.assig_ch = &_super_;
-        return true;
-      }
-
-      /// @a FINAL_V2
-      void remove(TransferDescriptor &td) {
-        if (td.assig_ch) [[likely]] {
-          // If this = base descriptor: move desc to owned mem
-          if (td.descPtr != &td.desc) {
-            auto *base_desc = &td.assig_ch->periph.bdesc[td.assig_ch->ch_id];
-            memcpy(&td.desc, base_desc, detail::dsize);
-            td.descPtr = &td.desc;
-
-            if (td.next) { // Move next down into base
-              memcpy(base_desc, &td.next->desc, detail::dsize);
-              td.next->descPtr = &td.next->desc;
-              td.assig_ch->btd = td.next;
-
-              // (If looped) -> link prev (last) -> next
-              TransferDescriptor *prev = td.assig_ch->btd;
-              while(prev->next && prev->next != td.assig_ch->btd) { prev = prev->next; }
-              if (prev->next == &td) {
-                prev->descPtr->DESCADDR.reg = td.descPtr->DESCADDR.reg;
-                prev->next = td.next;
-              }
-            } else { // Clear base descriptor
-              td.assig_ch->btd = nullptr;
-              auto *wb_desc = &td.assig_ch->periph.wbdesc[td.assig_ch->ch_id];
-              memset(base_desc, 0U, detail::dsize);
-              memset((void*)wb_desc, 0U, detail::dsize);
-
-              // Disable DMA
-              auto &dma = DMAC[td.assig_ch->periph.inst_num]; 
-              dma.Channel[td.assig_ch->ch_id].CHCTRLA.bit.ENABLE = 0;
-              while(dma.Channel[td.assig_ch->ch_id].CHCTRLA.bit.ENABLE);
-            }
-          } else { // Remove from middle of list... link prev -> next
-            TransferDescriptor *prev = td.assig_ch->btd;
-            while(prev->next != &td) { prev = prev->next; }
-            prev->descPtr->DESCADDR.reg = td.descPtr->DESCADDR.reg;
-            prev->next = td.next;
-          }
-          // Update writeback descriptor
-          auto *wb = &td.assig_ch->periph.wbdesc[td.assig_ch->ch_id];
-          if (wb->DESCADDR.reg == reinterpret_cast<uintptr_t>(td.descPtr)) {
-            wb->DESCADDR.reg = td.descPtr->DESCADDR.reg;
-
-            // If writeback now invalid -> disable channel
-            if (!wb->DESCADDR.reg && !wb->BTCNT.reg) {
-              auto &dma = DMAC[td.assig_ch->periph.inst_num];
-              dma.Channel[td.assig_ch->ch_id].CHCTRLA.bit.ENABLE = 0;
-              while(dma.Channel[td.assig_ch->ch_id].CHCTRLA.bit.ENABLE);
-            }
-          }
-          td.descPtr->DESCADDR.reg = 0;
-          td.assig_ch = nullptr;
-          td.next = nullptr;
-        }
-      }
-
-      /// @a FINAL_V2
-      inline TransferDescriptor *get(const unsigned int &index) {
-        if (!_super_.btd) [[unlikely]] { return nullptr; }
-        TransferDescriptor *curr{_super_.btd};
-        for (int i = 0; i < index; i++) {
-          if (!curr->next || curr->next == _super_.btd) { return nullptr; }
-          curr = curr->next;
-        }
-        return curr;
-      }
-
-      /// @a FINAL_V2
-      long index_of(TransferDescriptor &td) const {
-        if (_super_.btd) [[likely]] {
-          TransferDescriptor *curr{_super_.btd};
-          unsigned int curr_index{0};
-          do {
-            if (curr->next == &td) { return curr_index; }
-            curr = curr->next; 
-            curr_index++;
-          } while(curr && curr != _super_.btd);
-        }
-        return -1;
-      }
-
-      /// @a FINAL_V2
-      inline unsigned int size() const {
-        unsigned int curr_index{0};
-        if (_super_.btd) [[likely]] {
-          TransferDescriptor *curr{_super_.btd};
-          curr_index++;
-          do { 
-            curr = curr->next;
-            curr_index++;
-          } while(curr && curr != _super_.btd);
-        }
-        return curr_index;
-      }
-
-      Channel &_super_;
-    }descriptor_list{*this};
 
 
     /// FINAL_V2
-    struct {
+    struct Channel 
+    {
 
       /// @a FINAL_V2
-      void sync(const bool &sync_in_prog = false, const bool &keep_length = false) {
-        auto crit = detail::SuspendSection(&_super_);
-        Dmac &dma = DMAC[_super_.periph.inst_num];
-        auto &wb = _super_.periph.wbdesc[_super_.ch_id];
+      Channel(Peripheral &periph, const unsigned int &ch_id)
+        : periph(periph), ch_id(ch_id) {}
 
-        // Require descriptor list & not in progress (conditional)
-        if (_super_.btd && wb.SRCADDR.reg && (sync_in_prog || 
-            !dma.Channel[_super_.ch_id].CHSTATUS.bit.BUSY)) {
-          TransferDescriptor *curr = _super_.btd;
+      /// @a FINAL_V2
+      Channel(const Channel&) = delete;
+      Channel(Channel&&) = delete;
+      ~Channel() = delete;
 
-          // Find td corresponding to writeback descriptor
-          while(curr->descPtr->DESCADDR.reg != wb.DESCADDR.reg) {
-            if (!curr->next || curr->next == _super_.btd) { return; }
+      /// @a FINAL_V2
+      struct TransferConfig
+      {
+        const int32_t burstlen   = -1; // > Numeric 
+        const trigsrc_t trigsrc  = trigsrc_t::null;
+        const trigact_t trigact  = trigact_t::null;
+        const int32_t prilvl     = -1; 
+        const int32_t threshold  = -1; // > Numeric
+        const int32_t runstdby   = -1; // > Boolean cond
+      };
+
+      /// @a FINAL_V2
+      template<TransferConfig &cfg>
+      void set_transfer_config() {
+        using namespace ref;
+
+        // Record enable status & disable channel
+        bool prev_en = DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE;
+        DMAC[periph.inst_num].Channel[id].CHCTRLA.bit.ENABLE = 0;
+        while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE);
+
+        // Compute masks for config in ctrl register
+        constexpr auto chctrl_masks = [&]() consteval {
+          using ctrl_t = decltype(std::declval<DMAC_CHCTRLA_Type>().reg);
+          ctrl_t clr_msk{0}, set_msk{0};
+
+          if constexpr (cfg.burstlen != -1) {
+            constexpr uint32_t bl_reg = std::distance(burstlen_map.begin(),
+                std::find(burstlen_map.begin(), burstlen_map.end(), cfg.burstlen));
+            static_assert(bl_reg < burstlen_map.size(), 
+                "SIO ERROR (DMA): channel burstlen config invalid.");
+
+            clr_msk |= (DMAC_CHCTRLA_BURSTLEN_Msk);
+            set_msk |= (bl_reg << DMAC_CHCTRLA_BURSTLEN_Pos);
+          }
+          if constexpr (cfg.threshold != -1) {
+            constexpr uint32_t th_reg = std::distance(threshold_map.begin(),
+                std::find(threshold_map.begin(), threshold_map.end(), cfg.threshold));
+            static_assert(th_reg < threshold_map.size(), 
+                "SIO ERROR (DMA): channel threshold config invalid.");
+
+            clr_msk |= (DMAC_CHCTRLA_THRESHOLD_Msk);
+            set_msk |= (th_reg << DMAC_CHCTRLA_THRESHOLD_Pos);
+          }
+          if constexpr (cfg.trigsrc != trigsrc_t::null) {
+            clr_msk |= (DMAC_CHCTRLA_TRIGSRC_Msk);
+            set_msk |= (static_cast<uint32_t>(cfg.trigsrc) << DMAC_CHCTRLA_TRIGSRC_Pos);
+          }
+          if constexpr (cfg.trigact != trigact_t::null) {
+            clr_msk |= (DMAC_CHCTRLA_TRIGACT_Msk);
+            set_msk |= (static_cast<uint32_t>(cfg.trigact) << DMAC_CHCTRLA_TRIGACT_Pos);
+          }
+          if constexpr (cfg.runstdby != -1) {
+            static_assert(cfg.runstdby == 0 || cfg.runstdby == 1, 
+                "SIO ERROR (DMA): channel runstdby config invalid");
+            clr_msk |= (DMAC_CHCTRLA_RUNSTDBY);
+            set_msk |= (static_cast<bool>(cfg.runstdby) << DMAC_CHCTRLA_RUNSTDBY_Pos);
+          }
+          return std::make_pair(clr_msk, set_msk);
+        }(); 
+        DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.reg &= ~chctrl_masks.first; 
+        DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.reg |= chctrl_masks.second; 
+
+        // Compute masks for config in prictrl register & set them
+        constexpr auto chprilvl_masks = [&]() consteval {
+          using prictrl_t = decltype(std::declval<DMAC_PRICTRL0_Type>().reg);
+          prictrl_t clr_msk{0}, set_msk{0};
+
+          if constexpr (cfg.prilvl != -1) {
+            constexpr uint32_t plvl_reg = std::distance(prilvl_map.begin(),
+                std::find(prilvl_map.begin(), prilvl_map.end(), cfg.prilvl));
+            static_assert(plvl_reg < prilvl_map.size(), 
+                "SIO ERROR (DMA): channel prilvl config invalid.");
+
+            clr_msk |= (DMAC_CHPRILVL_PRILVL_Msk);
+            set_msk |= (plvl_reg << DMAC_CHPRILVL_PRILVL_Pos);
+          }
+          return std::make_pair(clr_msk, set_msk);
+        }();
+        DMAC[periph.inst_num].Channel[ch_id].CHPRILVL.reg &= ~chprilvl_masks.first;
+        DMAC[periph.inst_num].Channel[ch_id].CHPRILVL.reg |= chprilvl_masks.second;
+        DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = prev_en; // > Re-enable channel 
+      }
+
+      /// @a FINAL_V2
+      void set_transfer_config(const Channel &other) {
+        if (&other != this) {
+          // Capture enable state & disable channel
+          const bool prev_en = DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE;
+          DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = 0;
+          while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE);
+          
+          // Clear and set (with other) -> prilvl & ctrl registers
+          auto &o_inst = other.periph.inst_num;
+          DMAC[periph.inst_num].Channel[ch_id].CHPRILVL.reg = DMAC[o_inst].Channel[other.ch_id].CHPRILVL.reg;
+          DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.reg = (DMAC[o_inst].Channel[other.ch_id].CHCTRLA.reg 
+              & ~(DMAC_CHCTRLA_ENABLE | DMAC_CHCTRLA_SWRST));
+          DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = prev_en; // > Re-enable channel
+        }
+      }
+
+      /// @a FINAL_V2
+      struct InterruptConfig
+      {
+        const callback_t cb      = detail::dummy_cb; // > Callable (std::function - callback_t)
+        const int32_t susp_int   = -1; // > Boolean cond
+        const int32_t err_int    = -1; // > Boolean cond
+        const int32_t tcmpl_int  = -1; // > Boolean cond
+      };
+
+      /// @a FINAL_V2
+      template<InterruptConfig &cfg>
+      void set_interrupt_config() {
+        // Compute and set masks for interrupt cfg reg
+        constexpr auto chint_masks = [&]() consteval {
+          using inten_t = decltype(std::declval<DMAC_CHINTENSET_Type>().reg);
+          inten_t clr_msk{0}, set_msk{0};
+
+          if constexpr (cfg.susp_int != -1) {
+            static_assert(cfg.susp_int == 0 || cfg.susp_int == 1, 
+                "SIO ERROR (DMA): ch susp_int config invalid");
+            clr_msk |= (DMAC_CHINTENCLR_SUSP);
+            set_msk |= (static_cast<bool>(cfg.susp_int) << DMAC_CHINTENSET_SUSP_Pos);
+          }
+          if constexpr (cfg.err_int != -1) {
+            static_assert(cfg.err_int == 0 || cfg.err_int == 1, 
+                "SIO ERROR (DMA): ch err_int config invalid");
+            clr_msk |= (DMAC_CHINTENCLR_TERR);
+            set_msk |= (static_cast<bool>(cfg.err_int) << DMAC_CHINTENSET_TERR_Pos);
+          }
+          if constexpr (cfg.tcmpl_int != -1) {
+            static_assert(cfg.tcmpl_int == 0 || cfg.tcmpl_int == 1, 
+                "SIO ERROR (DMA): ch tcmpl_int config invalid");
+            clr_msk |= (DMAC_CHINTENCLR_TCMPL);
+            set_msk |= (static_cast<bool>(cfg.tcmpl_int) << DMAC_CHINTENSET_TCMPL_Pos);
+          }
+          return std::make_pair(clr_msk, set_msk);
+        }();
+        DMAC[periph.inst_num].Channel[ch_id].CHINTENSET.reg &= ~chint_masks.first;
+        DMAC[periph.inst_num].Channel[ch_id].CHINTENSET.reg |= chint_masks.second;
+        
+        // Register channel callback & callback function
+        if constexpr (cfg.cb != detail::dummy_cb) { 
+          callback = cfg.cb;
+        }
+      }
+
+      /// @a FINAL_V2
+      void set_interrupt_config(const Channel &other, const bool &copy_cb = true) {
+        if (&other != this) [[likely]] {
+          // Copy interrupt set register & callback
+          auto &o_chint = DMAC[other.periph.inst_num].Channel[other.ch_id].CHINTENSET.reg;
+          DMAC[periph.inst_num].Channel[ch_id].CHINTENSET.reg |= o_chint;
+          if (copy_cb) { callback = other.callback; }
+        }
+      }
+
+      /// @a FINAL_V2
+      Channel &operator = (const Channel &other) {
+        if (&other != this) [[likely]] {
+          set_transfer_config(other);
+          set_interrupt_config(other, true);
+        }
+        return *this;
+      }
+
+      /// @a FINAL_V2
+      void reset(const bool &clear_descriptors = true) {
+        if (clear_descriptors) [[likely]] { 
+          descriptor_list.clear(); 
+        }
+        DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = 0;     // Disable DMA channel
+        while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE);  // Wait for abort
+        DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.SWRST = 1;      // Software reset ch registers
+        while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.SWRST);   // Wait for sw reset
+        
+        auto wb_ptr = const_cast<DmacDescriptor*>(&periph.wbdesc[ch_id]);
+        auto b_ptr = &periph.bdesc[ch_id];
+
+        // Reset "fields" in common mem
+        memset(wb_ptr, 0U, detail::dsize); 
+        memset(b_ptr, 0U, detail::dsize);
+        callback = nullptr;
+        suspf = false;
+      }
+
+
+      /// @a FINAL_V2
+      bool set_state(const channel_state_t &targ_state) {
+        auto atomic = temp::atomic_section();
+        auto init_state = state();
+        if (targ_state != init_state) [[likely]] {
+
+          // Disable channel
+          if (targ_state == channel_state_t::disabled) [[unlikely]] {
+            DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = 0;
+            while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE);
+          
+          } else { // Enable/reset channel (if writeback invalid/end)
+            if (!periph.wbdesc[ch_id].BTCNT.reg && !periph.wbdesc[ch_id].DESCADDR.reg && 
+                init_state == channel_state_t::suspended) { 
+              DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = 0;
+              while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE);
+            }
+            DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE = 1;
+          }
+          // Suspend channel
+          if (targ_state == channel_state_t::suspended) [[unlikely]] {
+            DMAC[periph.inst_num].Channel[ch_id].CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_SUSPEND_Val;
+            while(DMAC[periph.inst_num].Channel[ch_id].CHCTRLB.bit.CMD == DMAC_CHCTRLB_CMD_SUSPEND_Val);
+            suspf = true;
+
+          // Resume channel (if susp ONLY) -> otherwise skip next susp
+          } else if (init_state == channel_state_t::suspended) {
+            DMAC[periph.inst_num].Channel[ch_id].CHCTRLB.bit.CMD = DMAC_CHCTRLB_CMD_RESUME_Val;
+            DMAC[periph.inst_num].Channel[ch_id].CHINTFLAG.bit.SUSP = 1;
+            suspf = false;
+          }
+        }
+        return (targ_state == state());
+      }
+
+      /// @a FINAL_V2
+      inline channel_state_t state() {
+        if (!DMAC[periph.inst_num].Channel[ch_id].CHCTRLA.bit.ENABLE) {
+          return channel_state_t::disabled;
+
+        } else if (DMAC[periph.inst_num].Channel[ch_id].CHINTFLAG.bit.SUSP || suspf) {
+          return channel_state_t::suspended;
+        }
+        return channel_state_t::enabled;
+      }
+
+      /// @a FINAL_V2
+      inline void trigger() {
+        using reg_t = decltype(std::declval<DMAC_SWTRIGCTRL_Type>().reg);
+        reg_t trig_msk = (1 << (ch_id + DMAC_SWTRIGCTRL_SWTRIG0_Pos)); 
+        DMAC[periph.inst_num].SWTRIGCTRL.reg |= trig_msk;
+      }
+
+      /// @a FINAL_V2
+      inline bool trigger_pending() const {
+        return DMAC[periph.inst_num].Channel[ch_id].CHSTATUS.bit.PEND;
+      }
+
+      /// @a FINAL_V2
+      inline bool transfer_busy() const {
+        return DMAC[periph.inst_num].Channel[ch_id].CHSTATUS.bit.BUSY &&
+            !(DMAC[periph.inst_num].Channel[ch_id].CHINTFLAG.bit.SUSP || suspf);
+      }
+
+
+      /// @a FINAL_V2
+      struct DescriptorList_t 
+      {
+
+        /// @a FINAL_V2
+        void clear() {
+          if (_super_.btd) [[likely]] { // Set channel state -> disabled
+            DMAC[_super_.periph.inst_num].Channel[_super_.ch_id].CHCTRLA.bit.ENABLE = 0;
+            while(DMAC[_super_.periph.inst_num].Channel[_super_.ch_id].CHCTRLA.bit.ENABLE);
+
+            // Return base descriptor to base td's owned memory
+            TransferDescriptor *curr = _super_.btd;
+            memcpy(&curr->desc, curr->descPtr, detail::dsize);
+            curr->descPtr = &curr->desc;
+
+            do { // Iter through & unlink/unassign descritors
+              curr->assig_ch = nullptr;
+              curr->descPtr->DESCADDR.reg = 0;
+              curr = std::exchange(curr->next, nullptr);
+            } while(curr && curr != _super_.btd);
+
+            // Clear state variables/writeback & disable channel
+            memset((void*)&_super_.periph.wbdesc[_super_.ch_id], 0U, detail::dsize);
+            memset(&_super_.periph.bdesc[_super_.ch_id], 0U, detail::dsize);
+            _super_.btd = nullptr;
+          }
+        }
+
+        /// @a FINAL_V2
+        template<TransferDescriptor&... tdlist, bool looped>
+        void set() {
+          if (sizeof...(tdlist)) [[likely]] {
+            Dmac &dma = DMAC[_super_.periph.inst_num];
+            bool prev_en = dma.Channel[_super_.ch_id].CHCTRLA.bit.ENABLE;
+            (tdlist.unlink(), ...);
+            clear();
+            // get first td & move desc to base memory
+            TransferDescriptor *base = ((tdlist, true) || ...);
+            memcpy(&_super_.periph.bdesc[_super_.ch_id], &base->desc, detail::dsize);
+            base->descPtr = &_super_.periph.bdesc[_super_.ch_id];
+            _super_.btd = base;
+
+            // Find initial previous descriptor (if looped -> last)
+            static constexpr detail::TdescResource dumm_rsrc{};
+            TransferDescriptor *prev{&dumm_rsrc};
+            if constexpr (looped) { prev = &(tdlist, ...); }
+
+            // Iterate (fold) through descriptors -> link together
+            ((prev->descPtr->DESCADDR.reg = reinterpret_cast
+                  <uintptr_t>(tdlist.descPtr),
+              tdlist.assig_ch = &_super_,
+              prev->next = &tdlist,
+              prev = &tdlist
+            ), ...);
+            // Re-enable channel if disabled
+            dma.Channel[ch_id].CHCTRLA.bit.ENABLE = prev_en;
+          }
+        }
+
+        /// @a FINAL_V2
+        bool add(TransferDescriptor &td, const unsigned int &index) {
+          auto crit = detail::SuspendSection(&_super_);
+
+          // Get resources & unlink channel
+          TransferDescriptor *ori_base = _super_.btd;
+          TransferDescriptor *prev{ori_base};
+          td.unlink();
+
+          // Set as new base descriptor 
+          if (!_super_.btd || !index) {
+            if (_super_.btd) {
+              memcpy(&_super_.btd->desc, _super_.btd->descPtr, detail::dsize);
+              _super_.btd->descPtr = &_super_.btd->desc;
+
+              // Link td to prev base...
+              auto l_addr = reinterpret_cast<uintptr_t>(_super_.btd); 
+              td.descPtr->DESCADDR.reg = l_addr;
+              td.next = _super_.btd;
+            }
+            // Move td descriptor into base memory section
+            auto *base_desc = &_super_.periph.bdesc[_super_.ch_id];
+            memcpy(base_desc, &td.desc, detail::dsize);
+            td.descPtr = &td.desc;
+            _super_.btd = &td;
+
+            // If looped -> Find and relink last descriptor
+            while(prev->next && prev->next != ori_base) { prev = prev->next; }
+            if (prev->next == ori_base) {
+              auto l_addr = reinterpret_cast<uintptr_t>(base_desc);
+              prev->descPtr->DESCADDR.reg = l_addr;
+              prev->next = &td;
+            }
+          } else { // Get previous descriptor
+            for (int i = 0; i < index; i++) {
+              if (!prev->next || prev->next == ori_base) { break; }
+              prev = prev->next;
+            }
+            // Link td -> prev (old) next
+            td.descPtr->DESCADDR.reg = prev->descPtr->DESCADDR.reg;
+            td.next = prev->next;
+
+            // Link prev -> new td
+            auto l_addr = reinterpret_cast<uintptr_t>(td.descPtr);
+            prev->descPtr->DESCADDR.reg = l_addr;
+            prev->next = &td;
+          }
+          // Relink writeback descriptor
+          auto &wb = _super_.periph.wbdesc[_super_.ch_id];
+          if (wb.DESCADDR.reg == td.descPtr->DESCADDR.reg) {
+            auto l_addr = reinterpret_cast<uintptr_t>(td.descPtr);
+            wb.DESCADDR.reg = l_addr;
+          }
+          td.assig_ch = &_super_;
+          return true;
+        }
+
+        /// @a FINAL_V2
+        void remove(TransferDescriptor &td) {
+          if (td.assig_ch) [[likely]] {
+            // If this = base descriptor: move desc to owned mem
+            if (td.descPtr != &td.desc) {
+              auto *base_desc = &td.assig_ch->periph.bdesc[td.assig_ch->ch_id];
+              memcpy(&td.desc, base_desc, detail::dsize);
+              td.descPtr = &td.desc;
+
+              if (td.next) { // Move next down into base
+                memcpy(base_desc, &td.next->desc, detail::dsize);
+                td.next->descPtr = &td.next->desc;
+                td.assig_ch->btd = td.next;
+
+                // (If looped) -> link prev (last) -> next
+                TransferDescriptor *prev = td.assig_ch->btd;
+                while(prev->next && prev->next != td.assig_ch->btd) { prev = prev->next; }
+                if (prev->next == &td) {
+                  prev->descPtr->DESCADDR.reg = td.descPtr->DESCADDR.reg;
+                  prev->next = td.next;
+                }
+              } else { // Clear base descriptor
+                td.assig_ch->btd = nullptr;
+                auto *wb_desc = &td.assig_ch->periph.wbdesc[td.assig_ch->ch_id];
+                memset(base_desc, 0U, detail::dsize);
+                memset((void*)wb_desc, 0U, detail::dsize);
+
+                // Disable DMA
+                auto &dma = DMAC[td.assig_ch->periph.inst_num]; 
+                dma.Channel[td.assig_ch->ch_id].CHCTRLA.bit.ENABLE = 0;
+                while(dma.Channel[td.assig_ch->ch_id].CHCTRLA.bit.ENABLE);
+              }
+            } else { // Remove from middle of list... link prev -> next
+              TransferDescriptor *prev = td.assig_ch->btd;
+              while(prev->next != &td) { prev = prev->next; }
+              prev->descPtr->DESCADDR.reg = td.descPtr->DESCADDR.reg;
+              prev->next = td.next;
+            }
+            // Update writeback descriptor
+            auto *wb = &td.assig_ch->periph.wbdesc[td.assig_ch->ch_id];
+            if (wb->DESCADDR.reg == reinterpret_cast<uintptr_t>(td.descPtr)) {
+              wb->DESCADDR.reg = td.descPtr->DESCADDR.reg;
+
+              // If writeback now invalid -> disable channel
+              if (!wb->DESCADDR.reg && !wb->BTCNT.reg) {
+                auto &dma = DMAC[td.assig_ch->periph.inst_num];
+                dma.Channel[td.assig_ch->ch_id].CHCTRLA.bit.ENABLE = 0;
+                while(dma.Channel[td.assig_ch->ch_id].CHCTRLA.bit.ENABLE);
+              }
+            }
+            td.descPtr->DESCADDR.reg = 0;
+            td.assig_ch = nullptr;
+            td.next = nullptr;
+          }
+        }
+
+        /// @a FINAL_V2
+        inline TransferDescriptor *get(const unsigned int &index) {
+          if (!_super_.btd) [[unlikely]] { return nullptr; }
+          TransferDescriptor *curr{_super_.btd};
+          for (int i = 0; i < index; i++) {
+            if (!curr->next || curr->next == _super_.btd) { return nullptr; }
             curr = curr->next;
           }
-          // Update writeback
-          if (keep_length) {
-            auto prev_cnt = wb.BTCNT.reg;
-            memcpy((void*)&wb, curr->descPtr, detail::dsize);
-            wb.BTCNT.reg = prev_cnt;
-          } else {
-            memcpy((void*)&wb, curr->descPtr, detail::dsize);
+          return curr;
+        }
+
+        /// @a FINAL_V2
+        long index_of(TransferDescriptor &td) const {
+          if (_super_.btd) [[likely]] {
+            TransferDescriptor *curr{_super_.btd};
+            unsigned int curr_index{0};
+            do {
+              if (curr->next == &td) { return curr_index; }
+              curr = curr->next; 
+              curr_index++;
+            } while(curr && curr != _super_.btd);
           }
-          // Disable channel if wbdesc made invalid
-          if (!wb.DESCADDR.reg && !wb.BTCNT.reg) {
+          return -1;
+        }
+
+        /// @a FINAL_V2
+        inline unsigned int size() const {
+          unsigned int curr_index{0};
+          if (_super_.btd) [[likely]] {
+            TransferDescriptor *curr{_super_.btd};
+            curr_index++;
+            do { 
+              curr = curr->next;
+              curr_index++;
+            } while(curr && curr != _super_.btd);
+          }
+          return curr_index;
+        }
+
+        Channel &_super_;
+      }descriptor_list{*this};
+
+
+      /// FINAL_V2
+      struct {
+
+        /// @a FINAL_V2
+        void sync(const bool &sync_in_prog = false, const bool &keep_length = false) {
+          auto crit = detail::SuspendSection(&_super_);
+          Dmac &dma = DMAC[_super_.periph.inst_num];
+          auto &wb = _super_.periph.wbdesc[_super_.ch_id];
+
+          // Require descriptor list & not in progress (conditional)
+          if (_super_.btd && wb.SRCADDR.reg && (sync_in_prog || 
+              !dma.Channel[_super_.ch_id].CHSTATUS.bit.BUSY)) {
+            TransferDescriptor *curr = _super_.btd;
+
+            // Find td corresponding to writeback descriptor
+            while(curr->descPtr->DESCADDR.reg != wb.DESCADDR.reg) {
+              if (!curr->next || curr->next == _super_.btd) { return; }
+              curr = curr->next;
+            }
+            // Update writeback
+            if (keep_length) {
+              auto prev_cnt = wb.BTCNT.reg;
+              memcpy((void*)&wb, curr->descPtr, detail::dsize);
+              wb.BTCNT.reg = prev_cnt;
+            } else {
+              memcpy((void*)&wb, curr->descPtr, detail::dsize);
+            }
+            // Disable channel if wbdesc made invalid
+            if (!wb.DESCADDR.reg && !wb.BTCNT.reg) {
+              dma.Channel[_super_.ch_id].CHCTRLA.bit.ENABLE = 0;
+              while(dma.Channel[_super_.ch_id].CHCTRLA.bit.ENABLE);
+            }
+          }
+        }
+
+        /// @a FINAL_V2
+        bool set(const unsigned int &td_index) {
+          if (!_super_.btd) { return false; }
+          auto crit = detail::SuspendSection(&_super_);
+          TransferDescriptor *curr = _super_.btd;
+
+          // Get descriptor at index
+          for (int i = 0; i < td_index; i++) {
+            if (!curr->next || curr->next == _super_.btd) { return false; }
+            curr = curr->next;
+          } 
+          // Copy descriptor @ index into writeback descriptor
+          auto *wb = &_super_.periph.wbdesc[_super_.ch_id];
+          memcpy((void*)wb, curr->descPtr, detail::dsize);
+        }
+
+        /// @a FINAL_V2
+        bool set(TransferDescriptor &td, const bool &keep_link = true) {
+          if (!_super_.btd) { return false; }
+          auto crit = detail::SuspendSection(&_super_);
+          auto &wb = _super_.periph.wbdesc[_super_.ch_id];
+          auto prev_link = wb.DESCADDR.reg;
+
+          // Copy specified td descriptor into writeback mem
+          memcpy((void*)&wb, td.descPtr, detail::dsize);
+          wb.DESCADDR.reg = keep_link ? prev_link : 0;
+
+          // Disable channel if writeback made invalid
+          if (!wb.BTCNT.reg && !wb.DESCADDR.reg) {
+            Dmac &dma = DMAC[_super_.periph.inst_num];
             dma.Channel[_super_.ch_id].CHCTRLA.bit.ENABLE = 0;
             while(dma.Channel[_super_.ch_id].CHCTRLA.bit.ENABLE);
           }
         }
-      }
 
-      /// @a FINAL_V2
-      bool set(const unsigned int &td_index) {
-        if (!_super_.btd) { return false; }
-        auto crit = detail::SuspendSection(&_super_);
-        TransferDescriptor *curr = _super_.btd;
+        /// @a FINAL_V2
+        TransferDescriptor *source_td() const {
+          auto crit = detail::SuspendSection(&_super_);
+          auto &wb = _super_.periph.wbdesc[_super_.ch_id];
+          if (!_super_.btd || !wb.SRCADDR.reg) { return nullptr; }
 
-        // Get descriptor at index
-        for (int i = 0; i < td_index; i++) {
-          if (!curr->next || curr->next == _super_.btd) { return false; }
-          curr = curr->next;
-        } 
-        // Copy descriptor @ index into writeback descriptor
-        auto *wb = &_super_.periph.wbdesc[_super_.ch_id];
-        memcpy((void*)wb, curr->descPtr, detail::dsize);
-      }
-
-      /// @a FINAL_V2
-      bool set(TransferDescriptor &td, const bool &keep_link = true) {
-        if (!_super_.btd) { return false; }
-        auto crit = detail::SuspendSection(&_super_);
-        auto &wb = _super_.periph.wbdesc[_super_.ch_id];
-        auto prev_link = wb.DESCADDR.reg;
-
-        // Copy specified td descriptor into writeback mem
-        memcpy((void*)&wb, td.descPtr, detail::dsize);
-        wb.DESCADDR.reg = keep_link ? prev_link : 0;
-
-        // Disable channel if writeback made invalid
-        if (!wb.BTCNT.reg && !wb.DESCADDR.reg) {
-          Dmac &dma = DMAC[_super_.periph.inst_num];
-          dma.Channel[_super_.ch_id].CHCTRLA.bit.ENABLE = 0;
-          while(dma.Channel[_super_.ch_id].CHCTRLA.bit.ENABLE);
-        }
-      }
-
-      /// @a FINAL_V2
-      TransferDescriptor *source_td() const {
-        auto crit = detail::SuspendSection(&_super_);
-        auto &wb = _super_.periph.wbdesc[_super_.ch_id];
-        if (!_super_.btd || !wb.SRCADDR.reg) { return nullptr; }
-
-        // Iterate through until iter link = wb link
-        TransferDescriptor *curr = _super_.btd;
-        while(curr->descPtr->DESCADDR.reg != wb.DESCADDR.reg) {
-          if (!curr->next || curr->next == _super_.btd) { return nullptr; }
-          curr = curr->next;
-        }
-        return curr;
-      }
-
-      /// @a FINAL_V2
-      long index() const {
-        auto crit = detail::SuspendSection(&_super_);
-        auto &wb = _super_.periph.wbdesc[_super_.ch_id];
-        
-        // Iterate through until writeback link = td @ index link
-        if (!_super_.btd || !wb.SRCADDR.reg) {
+          // Iterate through until iter link = wb link
           TransferDescriptor *curr = _super_.btd;
-          for (int i = 0; i < ref::max_td_inst; i++) {
-            if (curr->descPtr->DESCADDR.reg == wb.DESCADDR.reg) { return i; }
+          while(curr->descPtr->DESCADDR.reg != wb.DESCADDR.reg) {
+            if (!curr->next || curr->next == _super_.btd) { return nullptr; }
             curr = curr->next;
           }
+          return curr;
         }
-        return -1;
-      }
 
-      /// @a FINAL_V2
-      bool set_length(const length_t &length, const bool &in_bytes) {
-        auto crit = detail::SuspendSection(&_super_);
-        auto &wb = const_cast<DmacDescriptor&>(_super_.periph.wbdesc[_super_.ch_id]);
-        if (!_super_.btd || !wb.SRCADDR.reg) { return false; }
-
-        // Save initial (non mod) addresses -> must update with new mod 
-        uintptr_t s_addr = wb.SRCADDR.reg - detail::addr_mod(wb, true);
-        uintptr_t d_addr = wb.DSTADDR.reg - detail::addr_mod(wb, false);
-
-        // Update btcnt reg & src/dst addr
-        unsigned int new_cnt = length;
-        if (in_bytes && length) {
-          new_cnt /= ref::beatsize_map[wb.BTCTRL.bit.BEATSIZE];
+        /// @a FINAL_V2
+        long index() const {
+          auto crit = detail::SuspendSection(&_super_);
+          auto &wb = _super_.periph.wbdesc[_super_.ch_id];
+          
+          // Iterate through until writeback link = td @ index link
+          if (!_super_.btd || !wb.SRCADDR.reg) {
+            TransferDescriptor *curr = _super_.btd;
+            for (int i = 0; i < ref::max_td_inst; i++) {
+              if (curr->descPtr->DESCADDR.reg == wb.DESCADDR.reg) { return i; }
+              curr = curr->next;
+            }
+          }
+          return -1;
         }
-        wb.BTCNT.reg = new_cnt;
-        wb.SRCADDR.reg = s_addr + detail::addr_mod(wb, true);
-        wb.DSTADDR.reg = d_addr + detail::addr_mod(wb, false);
-      }
 
-      /// @a FINAL_V2
-      length_t length(const bool &in_bytes) const {
-        auto crit = detail::SuspendSection(&_super_);
-        auto &wb = _super_.periph.wbdesc[_super_.ch_id];
-        if (!_super_.btd || !wb.SRCADDR.reg) { return 0; }
-    
-        // Find length & augment by beatsize (if in bytes)
-        unsigned int length = wb.BTCNT.reg;
-        if (in_bytes) { 
-          length *= ref::beatsize_map[wb.BTCTRL.bit.BEATSIZE];
-        } 
-        return length;
-      }
+        /// @a FINAL_V2
+        bool set_length(const length_t &length, const bool &in_bytes) {
+          auto crit = detail::SuspendSection(&_super_);
+          auto &wb = const_cast<DmacDescriptor&>(_super_.periph.wbdesc[_super_.ch_id]);
+          if (!_super_.btd || !wb.SRCADDR.reg) { return false; }
 
-      Channel &_super_;
-    }active_transfer{*this};
+          // Save initial (non mod) addresses -> must update with new mod 
+          uintptr_t s_addr = wb.SRCADDR.reg - detail::addr_mod(wb, true);
+          uintptr_t d_addr = wb.DSTADDR.reg - detail::addr_mod(wb, false);
 
-    const unsigned int ch_id;
-    Peripheral &periph;
-    volatile bool suspf{false};
-    callback_t callback{nullptr};
-    TransferDescriptor *btd{nullptr};
+          // Update btcnt reg & src/dst addr
+          unsigned int new_cnt = length;
+          if (in_bytes && length) {
+            new_cnt /= ref::beatsize_map[wb.BTCTRL.bit.BEATSIZE];
+          }
+          wb.BTCNT.reg = new_cnt;
+          wb.SRCADDR.reg = s_addr + detail::addr_mod(wb, true);
+          wb.DSTADDR.reg = d_addr + detail::addr_mod(wb, false);
+        }
 
+        /// @a FINAL_V2
+        length_t length(const bool &in_bytes) const {
+          auto crit = detail::SuspendSection(&_super_);
+          auto &wb = _super_.periph.wbdesc[_super_.ch_id];
+          if (!_super_.btd || !wb.SRCADDR.reg) { return 0; }
+      
+          // Find length & augment by beatsize (if in bytes)
+          unsigned int length = wb.BTCNT.reg;
+          if (in_bytes) { 
+            length *= ref::beatsize_map[wb.BTCTRL.bit.BEATSIZE];
+          } 
+          return length;
+        }
+
+        Channel &_super_;
+      }active_transfer{*this};
+
+
+      private:
+        const unsigned int ch_id;
+        Peripheral &periph;
+        volatile bool suspf{false};
+        callback_t callback{nullptr};
+        TransferDescriptor *btd{nullptr};
+    };
+
+
+    private:
+      const unsigned int inst_num;
+      DmacDescriptor bdesc[ref::ch_num]{};
+      volatile DmacDescriptor wbdesc[ref::ch_num]{};
+      std::array<Channel*, ref::ch_num> ch_arr{};
   };
+
+
+
+ 
+
+
+
+
+
 
   /// @b TODO -> ACCESS CHANNEL
   template<uint32_t inst>
