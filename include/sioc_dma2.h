@@ -85,47 +85,39 @@ namespace sioc::dma
     /// Dummy objects
     inline void dummy_cb(const unsigned int &a, const callback_flag_t &b) { }
     inline struct {}dummy_loc;
+  
 
-    /// Misc globals
-    inline constexpr size_t dsize = sizeof(DmacDescriptor);
-    using dumm_t = decltype(dummy_loc);
+    /// Accessing objects
 
+  //   /// @a FINAL_V1
+  //   template<typename T, int uid>
+  //   struct static_inst { static inline T inst; };
 
-
-
-
-    template<typename T, unsigned int arr_size>
-    struct generic_wrapper {
-      static inline uint64_t inst_decl{0};
-      static inline std::array<T*, arr_size> inst_arr{nullptr};  
-    };
-
-    template<typename T, int inst>
-    struct static_wrapper {
-      static T static_inst;
-    };
-
-    #define BOOST_PP_COUNTER 1
-
-    template<long inst_num = -1>
-    Peripheral &access_peripheral(const unsigned int &inst_num_RT) {
-      using info = generic_wrapper<Peripheral, ref::inst_num>;
-
-      if constexpr (inst_num >= 0) {
-        if (info::inst_decl & (1 << inst_num)) {
-          return *info::inst_arr[inst_num];
-        } else {
-          static_wrapper<Peripheral*, inst_num> new_periph;
-          info::inst_arr.at(inst_num) = std::addressof(new_periph::static_inst);
-          info::inst_decl |= (1 << inst_num);
-        }
-      } else if (inst_num_RT >= 0 && (info::inst_decl & (1 << inst_num_RT))) {
-        return *info::inst_arr[inst_num_RT];
-      }
-    }
+  //   /// @a FINAL_V1
+  //   template<typename T, unsigned int max_inst, long uid_const = -1>
+  //   void accessor(const unsigned int &uid_runt) {
+  //     static inline std::array<T*, max_inst> rsrc_arr;
+      
+  //     if (uid_const >= 0 && uid_const < max_inst) {
+  //       unsigned int free_index{0};
+  //       unsigned int free_index = std::distance(rsrc_arr.begin(), 
+  //           std::find(rsrc_arr.begin(), rsrc_arr.end(), nullptr));
+        
+  //       if (free_index < rsrc_arr.size()) { // Instantiate new type @ index
+  //         static_inst<T, uid_const> new_inst;
+  //         rsrc_arr.at(free_index) = std::addressof(new_inst);
+  //       } else {
+  //         return rsrc_arr.at(uid_const);
+  //       }
+  //     } else if (uid_runt >= 0 && uid_runt < max_inst) {
+  //       return rsrc_arr[uid_runt];
+  //     }
+  //   }
+  // }
 
   }
-  
+
+
   /// @a FINAL_V2
   struct TransferDescriptor
   {
@@ -1311,9 +1303,7 @@ namespace sioc::dma
           cbf = callback_flag_t::terr;
         }
       }
-      // if (comm.cbarr[id] && cbf != callback_flag_t::null) {
-      //   comm.cbarr[id](id, cbf);
-      // }
+
     }
 
 
