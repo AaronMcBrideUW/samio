@@ -1,4 +1,6 @@
 
+/*
+
 #pragma once
 #include <sam.h>
 #include <sioc_dma_defs.h>
@@ -78,13 +80,16 @@ namespace sioc::dma
       }
 
       private:
-        Channel *ch;
+        Peripheral::Channel *ch;
         bool susp_flag = false;
     }; 
 
     /// Dummy objects
     inline void dummy_cb(const unsigned int &a, const callback_flag_t &b) { }
     inline struct {}dummy_loc;
+
+    using dummy_t = decltype(dummy_loc);
+    static constexpr auto dsize = sizeof(DmacDescriptor); 
   
 
     /// Accessing objects
@@ -440,18 +445,16 @@ namespace sioc::dma
 
 
 
-  /// @a TODO
+
   struct Peripheral
   {
-    
+          
     /// @a FINAL_V2
-    Peripheral(const unsigned int &inst_num) 
-      : inst_num(inst_num) {}
+    Peripheral() = default;
 
     /// @a TODO
     Peripheral(const Peripheral&) = delete;
     Peripheral(Peripheral&&) = delete;
-    ~Peripheral() = delete;
 
     /// @a FINAL_V2
     void init() {
@@ -641,19 +644,30 @@ namespace sioc::dma
 
     }
 
+    void access_channel() {
+
+    };
 
     /// FINAL_V2
     struct Channel 
     {
 
-      /// @a FINAL_V2
-      Channel(Peripheral &periph, const unsigned int &ch_id)
-        : periph(periph), ch_id(ch_id) {}
+      Channel() {
+        
+      };
 
-      /// @a FINAL_V2
+      bool init(const int &channel_id) {
+        
+      }
+
+
       Channel(const Channel&) = delete;
-      Channel(Channel&&) = delete;
-      ~Channel() = delete;
+    
+      Channel(Channel&&);
+
+      ~Channel() {
+        reset(true);
+      }
 
       /// @a FINAL_V2
       struct TransferConfig
@@ -1262,24 +1276,28 @@ namespace sioc::dma
 
 
       private:
+
+        bool suspended() {
+
+        }
+        
+        // TODO
         const unsigned int ch_id;
         Peripheral &periph;
-        volatile bool suspf{false};
-        callback_t callback{nullptr};
+        bool suspf{false};
+        callback_t callback{nullptr}; 
         TransferDescriptor *btd{nullptr};
     };
 
 
+
+
     private:
-      const unsigned int inst_num;
+
+      unsigned int inst_num;
       DmacDescriptor bdesc[ref::ch_num]{};
       volatile DmacDescriptor wbdesc[ref::ch_num]{};
-      std::array<Channel*, ref::ch_num> ch_arr{};
   };
-
-
-
- 
 
 
 
@@ -1327,3 +1345,5 @@ namespace sioc::dma
 
 
 } // End of sioc::dma namespace
+
+*/

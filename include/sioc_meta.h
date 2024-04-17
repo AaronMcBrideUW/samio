@@ -1,18 +1,18 @@
+
 #pragma once
+
 #include <sio_error.h>
 #include <utility>
 #include <source_location>
 #include <vector>
 #include <cstddef>
-
-
-
+#include <vector>
 
 
 namespace sioc::meta 
 {
 
-  /// @a FINAL_V1
+  /// @a TODO -> Needs redo
   template<typename inst_t>
   struct StaticCounter {
 
@@ -44,11 +44,7 @@ namespace sioc::meta
     static constexpr unsigned int &_static_count_ = count_v;
   };
 
-  // #define static_count(_inst_) StaticCounter<_inst_>::template _static_count_<[]{}>
-
   template<typename T>
   constexpr unsigned int &static_counter = StaticCounter<T>::_static_count_<[]{}>; 
 
 }
-
-

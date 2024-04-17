@@ -14,12 +14,13 @@
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #pragma once
+
 #include <sam.h>
 #include <inttypes.h>
 #include <array>
 #include <functional>
 
-namespace sioc::dma 
+namespace sioc::dma
 {
 
   enum class channel_state_t {
@@ -158,3 +159,4 @@ namespace sioc::dma
 
 
 } /// End of sioc::dma namespace
+
