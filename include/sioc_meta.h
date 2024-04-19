@@ -47,4 +47,6 @@ namespace sioc::meta
   template<typename T>
   constexpr unsigned int &static_counter = StaticCounter<T>::_static_count_<[]{}>; 
 
+
+
 }

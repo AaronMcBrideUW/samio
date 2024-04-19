@@ -22,18 +22,11 @@
 
 namespace sioc::dma
 {
-
   enum class channel_state_t {
     null      = 0,
     disabled  = 1,
     suspended = 2,
     enabled  = 3,
-  };
-
-  enum class periph_state_t {
-    null = 0,
-    exit = 1,
-    init = 2,
   };
 
   /// @brief Denotes the reason that an interrupt was triggered.
@@ -47,7 +40,7 @@ namespace sioc::dma
 
   /// @brief Denotes the type of transfer executed by a DMA channel
   ///   each time it recieves a trigger (i.e. is set active).
-  enum class blockact_t : int32_t {
+  enum class blockact_t : int8_t {
     null    = -1,
     noact   = 0,
     noint   = 1,
@@ -55,7 +48,7 @@ namespace sioc::dma
     both    = 3,
   };
 
-  enum class trigact_t : int32_t {
+  enum class trigact_t : int8_t {
     null  = -1,
     block = 0,
     burst = 2,
@@ -64,7 +57,7 @@ namespace sioc::dma
 
   /// @brief Denotes peripheral trigger sources that can be
   ///   linked to a DMA channel.
-  enum class trigsrc_t : int32_t {
+  enum class trigsrc_t : int8_t {
     null               = -1,
     none               = 0,
     rtc_timestamp      = 1,
@@ -154,7 +147,7 @@ namespace sioc::dma
   };
 
 
-  using callback_t = std::function<void(const unsigned int&, const callback_flag_t&)>;
+  using callback_t = std::function<void(const int&, const callback_flag_t&)>;
   using length_t = decltype(std::declval<DmacDescriptor>().BTCNT.reg);
 
 
